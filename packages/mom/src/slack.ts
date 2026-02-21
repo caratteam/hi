@@ -824,7 +824,8 @@ Reply with EXACTLY one word:
 		});
 
 		if (!response.ok) {
-			log.logWarning(`Reaction classification API error: ${response.status}`);
+			const errorBody = await response.text().catch(() => "");
+			log.logWarning(`Reaction classification API error: ${response.status} (auth: ${isOAuth ? "oauth" : "api-key"}, key prefix: ${apiKey.substring(0, 15)}...)`, errorBody);
 			return "ignore";
 		}
 

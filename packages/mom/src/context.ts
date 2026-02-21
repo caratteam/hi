@@ -294,4 +294,21 @@ export class MomSettingsManager {
 	getHookTimeout(): number {
 		return 30000;
 	}
+
+	// Compatibility shims for pi-coding-agent
+	getShellCommandPrefix(): string | undefined {
+		return undefined;
+	}
+
+	getImageAutoResize(): boolean {
+		return true;
+	}
+
+	getBranchSummarySettings(): { reserveTokens: number } {
+		return { reserveTokens: 16384 };
+	}
+
+	getTheme(): string | undefined {
+		return undefined;
+	}
 }

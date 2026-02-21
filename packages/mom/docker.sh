@@ -9,6 +9,9 @@
 #   ./docker.sh status              - Check container status
 #   ./docker.sh shell               - Open a shell in the container
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 CONTAINER_NAME="mom-sandbox"
 IMAGE="alpine:latest"
 
@@ -33,6 +36,7 @@ case "$1" in
     docker run -d \
       --name "$CONTAINER_NAME" \
       -v "${DATA_DIR}:/workspace" \
+      -v "${REPO_ROOT}:/pi-mono" \
       "$IMAGE" \
       tail -f /dev/null
     

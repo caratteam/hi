@@ -797,6 +797,10 @@ async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>
 		};
 		if (isOAuth) {
 			headers["authorization"] = `Bearer ${apiKey}`;
+			headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
+			headers["anthropic-dangerous-direct-browser-access"] = "true";
+			headers["user-agent"] = "claude-cli/2.1.2 (external, cli)";
+			headers["x-app"] = "cli";
 		} else {
 			headers["x-api-key"] = apiKey;
 		}

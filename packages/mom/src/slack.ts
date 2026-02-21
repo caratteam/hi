@@ -809,7 +809,7 @@ async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>
 			method: "POST",
 			headers,
 			body: JSON.stringify({
-				model: "claude-haiku-4-20250414",
+				model: "claude-haiku-4-5",
 				max_tokens: 50,
 				messages: [
 					{

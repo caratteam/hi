@@ -54,21 +54,17 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   fi
 fi
 
-# Mom 백그라운드 실행 및 로그 따라가기
+# Mom 백그라운드 실행
 echo "Starting Mom with data directory: $DATA_DIR"
-echo "Logs are also saved to: $LOG_FILE"
-echo "Press Ctrl+C to detach (Mom will continue running in background)"
 echo "─────────────────────────────────────────────────────────"
 cd "$REPO_ROOT"
 
-# 백그라운드로 시작
 nohup npx tsx packages/mom/src/main.ts --sandbox=docker:${CONTAINER_NAME} "$DATA_DIR" >> "$LOG_FILE" 2>&1 &
+disown
 PID=$!
 
-# 잠깐 대기 후 로그 따라가기
 sleep 1
 echo "Mom started with PID: $PID"
-echo ""
-
-# tail로 로그 실시간 표시 (Ctrl+C로 종료해도 Mom은 계속 실행됨)
-tail -f "$LOG_FILE"
+echo "Log file: $LOG_FILE"
+echo "To view logs: tail -f $LOG_FILE"
+echo "To stop: pkill -f 'tsx.*mom/src/main.ts'"

@@ -42,6 +42,17 @@ export interface AgentRunner {
 	abort(): void;
 }
 
+/** Shared AuthStorage instance for API key access */
+let sharedAuthStorage: AuthStorage | null = null;
+
+/** Get Anthropic API key for lightweight operations (e.g. reaction classification) */
+export async function getAnthropicKey(): Promise<string> {
+	if (!sharedAuthStorage) {
+		sharedAuthStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
+	}
+	return getAnthropicApiKey(sharedAuthStorage);
+}
+
 async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
 	const key = await authStorage.getApiKey("anthropic");
 	if (!key) {
@@ -432,6 +443,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	// Create AuthStorage and ModelRegistry
 	// Auth stored outside workspace so agent can't access it
 	const authStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
+	sharedAuthStorage = authStorage;
 	const modelRegistry = new ModelRegistry(authStorage);
 
 	// Create agent

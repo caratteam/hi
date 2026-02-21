@@ -6,6 +6,19 @@ import * as log from "./log.js";
 import type { Attachment, ChannelStore } from "./store.js";
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+/** Slack's max text length for chat.postMessage / chat.update is 40000, use a safe margin */
+const SLACK_MAX_TEXT = 39000;
+
+/** Truncate text to fit Slack's message size limit */
+function truncateForSlack(text: string): string {
+	if (text.length <= SLACK_MAX_TEXT) return text;
+	return text.substring(0, SLACK_MAX_TEXT) + "\n\n_... (truncated, response too long)_";
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -135,14 +148,16 @@ export class SlackBot {
 	private users = new Map<string, SlackUser>();
 	private channels = new Map<string, SlackChannel>();
 	private queues = new Map<string, ChannelQueue>();
+	private getApiKey?: () => Promise<string>;
 
 	constructor(
 		handler: MomHandler,
-		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore },
+		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore; getApiKey?: () => Promise<string> },
 	) {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
 		this.store = config.store;
+		this.getApiKey = config.getApiKey;
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 	}
@@ -186,12 +201,12 @@ export class SlackBot {
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, text });
+		const result = await this.webClient.chat.postMessage({ channel, text: truncateForSlack(text) });
 		return result.ts as string;
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
-		await this.webClient.chat.update({ channel, ts, text });
+		await this.webClient.chat.update({ channel, ts, text: truncateForSlack(text) });
 	}
 
 	async deleteMessage(channel: string, ts: string): Promise<void> {
@@ -199,7 +214,7 @@ export class SlackBot {
 	}
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text });
+		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncateForSlack(text) });
 		return result.ts as string;
 	}
 
@@ -330,6 +345,36 @@ export class SlackBot {
 			}
 
 			ack();
+		});
+
+		// Reaction events - emoji on mom's messages can trigger actions
+		this.socketClient.on("reaction_added", ({ event, ack }) => {
+			const e = event as {
+				type: string;
+				user: string;
+				reaction: string;
+				item: { type: string; channel: string; ts: string };
+				item_user?: string;
+			};
+
+			ack();
+
+			// Only care about reactions on messages
+			if (e.item.type !== "message") return;
+
+			// Only care about reactions on mom's messages
+			if (e.item_user !== this.botUserId) return;
+
+			// Skip if before startup
+			if (this.startupTs && e.item.ts < this.startupTs) return;
+
+			// Skip if already busy
+			if (this.handler.isRunning(e.item.channel)) return;
+
+			// Handle async
+			this.handleReaction(e.user, e.reaction, e.item.channel, e.item.ts).catch((err) => {
+				log.logWarning("Reaction handler error", err instanceof Error ? err.message : String(err));
+			});
 		});
 
 		// All messages (for logging) + DMs (for triggering)
@@ -624,5 +669,165 @@ export class SlackBot {
 			}
 			cursor = result.response_metadata?.next_cursor;
 		} while (cursor);
+	}
+
+	/**
+	 * Handle a reaction on mom's message.
+	 * Finds the original requester from the thread, verifies the reactor is that person,
+	 * then uses a lightweight LLM to classify the emoji intent.
+	 */
+	private async handleReaction(reactorUserId: string, emoji: string, channel: string, messageTs: string): Promise<void> {
+		// Find the requester: the last non-bot user who spoke BEFORE the reacted message.
+		// Strategy:
+		// 1. Try thread context (conversations.replies) - for in-thread conversations
+		// 2. Fall back to channel history (conversations.history) - for top-level messages
+		let requesterId: string | null = null;
+
+		// Helper: find last human user before messageTs in a list of messages
+		const findRequester = (messages: Array<{ user?: string; bot_id?: string; ts: string }>): string | null => {
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const msg = messages[i];
+				if (msg.ts >= messageTs) continue;
+				if (msg.user && msg.user !== this.botUserId && !msg.bot_id) {
+					return msg.user;
+				}
+			}
+			return null;
+		};
+
+		try {
+			// 1. Try thread replies first
+			const threadResult = await this.webClient.conversations.replies({
+				channel,
+				ts: messageTs,
+				limit: 100,
+			});
+			const threadMessages = threadResult.messages as Array<{ user?: string; bot_id?: string; ts: string }> | undefined;
+			if (threadMessages) {
+				requesterId = findRequester(threadMessages);
+			}
+		} catch {
+			// conversations.replies may fail if messageTs is not a thread parent
+		}
+
+		if (!requesterId) {
+			try {
+				// 2. Fall back to channel history - look for messages before the reacted one
+				const historyResult = await this.webClient.conversations.history({
+					channel,
+					latest: messageTs,
+					limit: 10,
+					inclusive: false,
+				});
+				const historyMessages = historyResult.messages as Array<{ user?: string; bot_id?: string; ts: string }> | undefined;
+				if (historyMessages) {
+					// history returns newest first, so first non-bot message is the closest one before messageTs
+					for (const msg of historyMessages) {
+						if (msg.user && msg.user !== this.botUserId && !msg.bot_id) {
+							requesterId = msg.user;
+							break;
+						}
+					}
+				}
+			} catch {
+				// Can't determine requester
+			}
+		}
+
+		if (!requesterId) {
+			log.logInfo(`[${channel}] Reaction :${emoji}: could not determine requester, ignoring`);
+			return;
+		}
+
+		// Only the requester can approve via reaction
+		if (requesterId !== reactorUserId) {
+			log.logInfo(`[${channel}] Reaction :${emoji}: from non-requester, ignoring`);
+			return;
+		}
+
+		// Classify the emoji intent using a lightweight LLM
+		const intent = await classifyReaction(emoji, this.getApiKey);
+		log.logInfo(`[${channel}] Reaction :${emoji}: classified as "${intent}"`);
+
+		if (intent === "ignore") return;
+
+		const intentText = intent === "approve" ? "진행해" : `리액션 :${emoji}: 으로 거절했습니다. 진행하지 마세요.`;
+
+		const user = this.users.get(reactorUserId);
+		log.logInfo(`[${channel}] Reaction trigger :${emoji}: from ${user?.userName || reactorUserId} → "${intentText}"`);
+
+		const slackEvent: SlackEvent = {
+			type: "mention",
+			channel,
+			ts: messageTs,
+			thread_ts: messageTs,
+			user: reactorUserId,
+			text: intentText,
+		};
+
+		this.logUserMessage(slackEvent);
+		this.getQueue(channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
+	}
+}
+
+/**
+ * Classify a Slack emoji reaction using a lightweight LLM (Claude Haiku).
+ * Returns "approve" for go-ahead signals, "reject" for disapproval,
+ * or "ignore" for irrelevant reactions.
+ */
+async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>): Promise<"approve" | "reject" | "ignore"> {
+	let apiKey = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+	if (!apiKey && getApiKey) {
+		try {
+			apiKey = await getApiKey();
+		} catch {
+			// Failed to get API key
+		}
+	}
+	if (!apiKey) {
+		log.logWarning("No Anthropic API key available for reaction classification, defaulting to ignore");
+		return "ignore";
+	}
+
+	try {
+		const response = await fetch("https://api.anthropic.com/v1/messages", {
+			method: "POST",
+			headers: {
+				"x-api-key": apiKey,
+				"anthropic-version": "2023-06-01",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({
+				model: "claude-haiku-4-20250414",
+				max_tokens: 50,
+				messages: [
+					{
+						role: "user",
+						content: `Slack emoji reaction: :${emoji}:
+
+Classify this emoji's intent in the context of someone reacting to a bot message that asked "should I proceed?" or proposed a plan/code change.
+
+Reply with EXACTLY one word:
+- "approve" if the emoji signals agreement, approval, go-ahead, thumbs up, OK, yes, check mark, etc.
+- "reject" if the emoji signals disagreement, disapproval, no, stop, thumbs down, X, etc.
+- "ignore" if the emoji is ambiguous, decorative, or unrelated to approval/rejection (e.g. eyes, laugh, heart, etc.)`,
+					},
+				],
+			}),
+		});
+
+		if (!response.ok) {
+			log.logWarning(`Reaction classification API error: ${response.status}`);
+			return "ignore";
+		}
+
+		const data = (await response.json()) as { content: Array<{ type: string; text: string }> };
+		const text = data.content?.[0]?.text?.trim().toLowerCase() || "ignore";
+
+		if (text === "approve" || text === "reject") return text;
+		return "ignore";
+	} catch (err) {
+		log.logWarning("Reaction classification error", err instanceof Error ? err.message : String(err));
+		return "ignore";
 	}
 }

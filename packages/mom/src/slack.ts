@@ -14,8 +14,11 @@ const SLACK_MAX_TEXT = 39000;
 
 /** Truncate text to fit Slack's message size limit */
 function truncateForSlack(text: string): string {
-	if (text.length <= SLACK_MAX_TEXT) return text;
-	return text.substring(0, SLACK_MAX_TEXT) + "\n\n_... (truncated, response too long)_";
+	if (text.length > SLACK_MAX_TEXT) {
+		log.logWarning(`Truncating Slack message: ${text.length} chars -> ${SLACK_MAX_TEXT} chars`);
+		return text.substring(0, SLACK_MAX_TEXT) + "\n\n_... (truncated, response too long)_";
+	}
+	return text;
 }
 
 // ============================================================================
@@ -201,12 +204,16 @@ export class SlackBot {
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, text: truncateForSlack(text) });
+		const truncated = truncateForSlack(text);
+		log.logInfo(`[slack] postMessage: ${text.length} chars (truncated: ${truncated.length})`);
+		const result = await this.webClient.chat.postMessage({ channel, text: truncated });
 		return result.ts as string;
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
-		await this.webClient.chat.update({ channel, ts, text: truncateForSlack(text) });
+		const truncated = truncateForSlack(text);
+		log.logInfo(`[slack] updateMessage: ${text.length} chars (truncated: ${truncated.length})`);
+		await this.webClient.chat.update({ channel, ts, text: truncated });
 	}
 
 	async deleteMessage(channel: string, ts: string): Promise<void> {
@@ -214,7 +221,9 @@ export class SlackBot {
 	}
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncateForSlack(text) });
+		const truncated = truncateForSlack(text);
+		log.logInfo(`[slack] postInThread: ${text.length} chars (truncated: ${truncated.length})`);
+		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncated });
 		return result.ts as string;
 	}
 

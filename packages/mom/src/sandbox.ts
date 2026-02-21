@@ -69,11 +69,11 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
 /**
  * Create an executor that runs commands either on host or in Docker container
  */
-export function createExecutor(config: SandboxConfig): Executor {
+export function createExecutor(config: SandboxConfig, envVars?: Record<string, string>): Executor {
 	if (config.type === "host") {
 		return new HostExecutor();
 	}
-	return new DockerExecutor(config.container);
+	return new DockerExecutor(config.container, envVars);
 }
 
 export interface Executor {
@@ -177,11 +177,20 @@ class HostExecutor implements Executor {
 }
 
 class DockerExecutor implements Executor {
-	constructor(private container: string) {}
+	private envVars: Record<string, string>;
+
+	constructor(private container: string, envVars?: Record<string, string>) {
+		this.envVars = envVars || {};
+	}
 
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+		// Build environment variable flags
+		const envFlags = Object.entries(this.envVars)
+			.map(([k, v]) => `-e ${k}=${shellEscape(v)}`)
+			.join(" ");
+
 		// Wrap command for docker exec
-		const dockerCmd = `docker exec ${this.container} sh -c ${shellEscape(command)}`;
+		const dockerCmd = `docker exec ${envFlags} ${this.container} sh -c ${shellEscape(command)}`;
 		const hostExecutor = new HostExecutor();
 		return hostExecutor.exec(dockerCmd, options);
 	}

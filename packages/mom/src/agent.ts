@@ -419,8 +419,31 @@ export function getOrCreateRunner(sandboxConfig: SandboxConfig, channelId: strin
  * Create a new AgentRunner for a channel.
  * Sets up the session and subscribes to events once.
  */
+/** Known provider-to-env-var mappings for sandbox injection */
+const PROVIDER_ENV_KEYS: Record<string, string> = {
+	fal: "FAL_KEY",
+	openai: "OPENAI_API_KEY",
+};
+
 function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
-	const executor = createExecutor(sandboxConfig);
+	// Load API keys from AuthStorage to inject into sandbox environment
+	const authPath = join(homedir(), ".pi", "mom", "auth.json");
+	const sandboxEnv: Record<string, string> = {};
+	try {
+		if (existsSync(authPath)) {
+			const authData = JSON.parse(readFileSync(authPath, "utf-8"));
+			for (const [provider, envVar] of Object.entries(PROVIDER_ENV_KEYS)) {
+				const cred = authData[provider];
+				if (cred?.type === "api_key" && cred.key) {
+					sandboxEnv[envVar] = cred.key;
+				}
+			}
+		}
+	} catch {
+		// Ignore auth read errors
+	}
+
+	const executor = createExecutor(sandboxConfig, sandboxEnv);
 	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 
 	// User ID will be set during run()

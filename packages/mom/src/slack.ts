@@ -745,16 +745,13 @@ export class SlackBot {
 			return;
 		}
 
-		// Classify the emoji intent using a lightweight LLM
-		const intent = await classifyReaction(emoji, this.getApiKey);
-		log.logInfo(`[${channel}] Reaction :${emoji}: classified as "${intent}"`);
+		// Interpret the emoji reaction using a lightweight LLM
+		const interpretation = await interpretReaction(emoji, this.getApiKey);
+		log.logInfo(`[${channel}] Reaction :${emoji}: interpreted as "${interpretation}"`);
 
-		if (intent === "ignore") return;
+		if (interpretation === "ignore") return;
 
-		const intentText =
-			intent === "approve"
-				? `[이모지 :${emoji}: 승인] 진행해`
-				: `[이모지 :${emoji}: 거절] 진행하지 마세요.`;
+		const intentText = `[이모지 :${emoji}: 리액션] ${interpretation}`;
 
 		const user = this.users.get(reactorUserId);
 		log.logInfo(`[${channel}] Reaction trigger :${emoji}: from ${user?.userName || reactorUserId} → "${intentText}"`);
@@ -774,11 +771,11 @@ export class SlackBot {
 }
 
 /**
- * Classify a Slack emoji reaction using a lightweight LLM (Claude Haiku).
- * Returns "approve" for go-ahead signals, "reject" for disapproval,
- * or "ignore" for irrelevant reactions.
+ * Interpret a Slack emoji reaction using a lightweight LLM (Claude Haiku).
+ * Returns a natural language interpretation of the emoji's intent,
+ * or "ignore" if the emoji is not meaningful enough to act on.
  */
-async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>): Promise<"approve" | "reject" | "ignore"> {
+async function interpretReaction(emoji: string, getApiKey?: () => Promise<string>): Promise<string> {
 	let apiKey = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
 	if (!apiKey && getApiKey) {
 		try {
@@ -788,7 +785,7 @@ async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>
 		}
 	}
 	if (!apiKey) {
-		log.logWarning("No Anthropic API key available for reaction classification, defaulting to ignore");
+		log.logWarning("No Anthropic API key available for reaction interpretation, defaulting to ignore");
 		return "ignore";
 	}
 
@@ -813,18 +810,23 @@ async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>
 			headers,
 			body: JSON.stringify({
 				model: "claude-haiku-4-5",
-				max_tokens: 50,
+				max_tokens: 100,
 				messages: [
 					{
 						role: "user",
-						content: `Slack emoji reaction: :${emoji}:
+						content: `A user reacted to an AI assistant's Slack message with the emoji :${emoji}:
 
-Classify this emoji's intent in the context of someone reacting to a bot message that asked "should I proceed?" or proposed a plan/code change.
+Interpret what the user likely means by this reaction. Consider possibilities like:
+- Approval/agreement (go ahead, yes, proceed)
+- Disapproval/rejection (no, stop, don't do that)
+- Curiosity or questioning (what does this mean?)
+- Humor or amusement (that's funny)
+- Amazement or excitement (wow, brilliant idea)
+- Gratitude (thanks)
+- Other emotions or intentions
 
-Reply with EXACTLY one word:
-- "approve" if the emoji signals agreement, approval, go-ahead, thumbs up, OK, yes, check mark, etc.
-- "reject" if the emoji signals disagreement, disapproval, no, stop, thumbs down, X, etc.
-- "ignore" if the emoji is ambiguous, decorative, or unrelated to approval/rejection (e.g. eyes, laugh, heart, etc.)`,
+Reply with a SHORT phrase describing the user's intent (e.g. "승인", "거절", "재미있다는 반응", "감탄", "궁금해하는 반응").
+If the emoji is too ambiguous or meaningless to interpret, reply with exactly "ignore".`,
 					},
 				],
 			}),
@@ -832,17 +834,16 @@ Reply with EXACTLY one word:
 
 		if (!response.ok) {
 			const errorBody = await response.text().catch(() => "");
-			log.logWarning(`Reaction classification API error: ${response.status} (auth: ${isOAuth ? "oauth" : "api-key"}, key prefix: ${apiKey.substring(0, 15)}...)`, errorBody);
+			log.logWarning(`Reaction interpretation API error: ${response.status} (auth: ${isOAuth ? "oauth" : "api-key"}, key prefix: ${apiKey.substring(0, 15)}...)`, errorBody);
 			return "ignore";
 		}
 
 		const data = (await response.json()) as { content: Array<{ type: string; text: string }> };
-		const text = data.content?.[0]?.text?.trim().toLowerCase() || "ignore";
+		const text = data.content?.[0]?.text?.trim() || "ignore";
 
-		if (text === "approve" || text === "reject") return text;
-		return "ignore";
+		return text.toLowerCase() === "ignore" ? "ignore" : text;
 	} catch (err) {
-		log.logWarning("Reaction classification error", err instanceof Error ? err.message : String(err));
+		log.logWarning("Reaction interpretation error", err instanceof Error ? err.message : String(err));
 		return "ignore";
 	}
 }

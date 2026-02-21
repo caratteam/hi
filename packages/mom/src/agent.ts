@@ -785,7 +785,34 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			};
 			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
 
-			await session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined);
+			// Try prompt, handle msg_too_long by trimming context
+			let retries = 0;
+			const maxRetries = 3;
+			while (true) {
+				await session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined);
+
+				// Check if msg_too_long error occurred
+				if (
+					runState.stopReason === "error" &&
+					runState.errorMessage?.includes("msg_too_long") &&
+					retries < maxRetries
+				) {
+					retries++;
+					const messages = session.messages;
+					const keepCount = Math.max(2, Math.floor(messages.length / 2));
+					const trimmed = messages.slice(messages.length - keepCount);
+					session.agent.replaceMessages(trimmed);
+					log.logInfo(
+						`[${channelId}] Context too long, trimmed to ${trimmed.length} messages (retry ${retries}/${maxRetries})`,
+					);
+
+					// Reset error state for retry
+					runState.stopReason = "";
+					runState.errorMessage = undefined;
+					continue;
+				}
+				break;
+			}
 
 			// Wait for queued messages
 			await queueChain;

@@ -751,7 +751,10 @@ export class SlackBot {
 
 		if (intent === "ignore") return;
 
-		const intentText = intent === "approve" ? "진행해" : `리액션 :${emoji}: 으로 거절했습니다. 진행하지 마세요.`;
+		const intentText =
+			intent === "approve"
+				? `[이모지 :${emoji}: 승인] 진행해`
+				: `[이모지 :${emoji}: 거절] 진행하지 마세요.`;
 
 		const user = this.users.get(reactorUserId);
 		log.logInfo(`[${channel}] Reaction trigger :${emoji}: from ${user?.userName || reactorUserId} → "${intentText}"`);

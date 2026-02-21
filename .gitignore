@@ -35,3 +35,4 @@ packages/coding-agent/binaries/
 todo.md
 
 .claude/
+.mom-temp/

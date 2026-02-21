@@ -1,6 +1,7 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { basename, resolve as resolvePath } from "path";
+import { containerToHostPath } from "../path-resolver.js";
 
 // This will be set by the agent before running
 let uploadFn: ((filePath: string, title?: string) => Promise<void>) | null = null;
@@ -35,9 +36,10 @@ export const attachTool: AgentTool<typeof attachSchema> = {
 		}
 
 		const absolutePath = resolvePath(path);
+		const hostPath = containerToHostPath(absolutePath);
 		const fileName = title || basename(absolutePath);
 
-		await uploadFn(absolutePath, fileName);
+		await uploadFn(hostPath, fileName);
 
 		return {
 			content: [{ type: "text" as const, text: `Attached file: ${fileName}` }],

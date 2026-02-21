@@ -850,7 +850,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				const contextWindow = model.contextWindow || 200000;
 
 				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow, model.id);
-				runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
+				runState.queue.enqueue(() => ctx.respondInThread(summary, true), "usage summary");
 				await queueChain;
 			}
 

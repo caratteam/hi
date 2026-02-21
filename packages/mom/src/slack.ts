@@ -59,7 +59,7 @@ export interface SlackContext {
 	users: UserInfo[];
 	respond: (text: string, shouldLog?: boolean) => Promise<void>;
 	replaceMessage: (text: string) => Promise<void>;
-	respondInThread: (text: string) => Promise<void>;
+	respondInThread: (text: string, force?: boolean) => Promise<void>;
 	setTyping: (isTyping: boolean) => Promise<void>;
 	uploadFile: (filePath: string, title?: string) => Promise<void>;
 	setWorking: (working: boolean) => Promise<void>;

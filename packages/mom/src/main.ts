@@ -180,10 +180,15 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			await updatePromise;
 		},
 
-		respondInThread: async (text: string) => {
+		respondInThread: async (text: string, force?: boolean) => {
 			updatePromise = updatePromise.then(async () => {
 				if (messageTs) {
-					const ts = await slack.postInThread(event.channel, messageTs, text);
+					// When already in a thread, skip sub-thread messages unless forced
+					if (event.thread_ts && !force) {
+						return;
+					}
+					const threadTs = event.thread_ts || messageTs;
+					const ts = await slack.postInThread(event.channel, threadTs, text);
 					threadMessageTs.push(ts);
 				}
 			});

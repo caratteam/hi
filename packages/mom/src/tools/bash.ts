@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
+import { checkAccess } from "../access-control.js";
 import type { Executor } from "../sandbox.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateTail } from "./truncate.js";
 
@@ -26,7 +27,7 @@ interface BashToolDetails {
 	fullOutputPath?: string;
 }
 
-export function createBashTool(executor: Executor): AgentTool<typeof bashSchema> {
+export function createBashTool(executor: Executor, getUserId: () => string | undefined): AgentTool<typeof bashSchema> {
 	return {
 		name: "bash",
 		label: "bash",
@@ -37,6 +38,11 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 			{ command, timeout }: { label: string; command: string; timeout?: number },
 			signal?: AbortSignal,
 		) => {
+			// Check access control
+			const userId = getUserId();
+			if (userId) {
+				checkAccess({ userId, command }, "execute");
+			}
 			// Track output for potential temp file writing
 			let tempFilePath: string | undefined;
 			let tempFileStream: ReturnType<typeof createWriteStream> | undefined;

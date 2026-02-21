@@ -8,12 +8,12 @@ import { createWriteTool } from "./write.js";
 
 export { setUploadFunction } from "./attach.js";
 
-export function createMomTools(executor: Executor): AgentTool<any>[] {
+export function createMomTools(executor: Executor, getUserId: () => string | undefined): AgentTool<any>[] {
 	return [
 		createReadTool(executor),
-		createBashTool(executor),
-		createEditTool(executor),
-		createWriteTool(executor),
+		createBashTool(executor, getUserId),
+		createEditTool(executor, getUserId),
+		createWriteTool(executor, getUserId),
 		attachTool,
 	];
 }

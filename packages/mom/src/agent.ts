@@ -412,8 +412,11 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 
-	// Create tools
-	const tools = createMomTools(executor);
+	// User ID will be set during run()
+	let currentUserId: string | undefined;
+
+	// Create tools with access to current user ID
+	const tools = createMomTools(executor, () => currentUserId);
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
@@ -644,6 +647,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			_store: ChannelStore,
 			_pendingMessages?: PendingMessage[],
 		): Promise<{ stopReason: string; errorMessage?: string }> {
+			// Set current user ID for access control
+			currentUserId = ctx.message.user;
+
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
 

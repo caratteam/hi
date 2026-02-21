@@ -1,5 +1,6 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
+import { checkAccess } from "../access-control.js";
 import type { Executor } from "../sandbox.js";
 
 const writeSchema = Type.Object({
@@ -8,7 +9,7 @@ const writeSchema = Type.Object({
 	content: Type.String({ description: "Content to write to the file" }),
 });
 
-export function createWriteTool(executor: Executor): AgentTool<typeof writeSchema> {
+export function createWriteTool(executor: Executor, getUserId: () => string | undefined): AgentTool<typeof writeSchema> {
 	return {
 		name: "write",
 		label: "write",
@@ -20,6 +21,11 @@ export function createWriteTool(executor: Executor): AgentTool<typeof writeSchem
 			{ path, content }: { label: string; path: string; content: string },
 			signal?: AbortSignal,
 		) => {
+			// Check access control
+			const userId = getUserId();
+			if (userId) {
+				checkAccess({ userId, path }, "write");
+			}
 			// Create parent directories and write file using heredoc
 			const dir = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : ".";
 

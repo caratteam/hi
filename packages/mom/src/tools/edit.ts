@@ -1,6 +1,7 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import * as Diff from "diff";
+import { checkAccess } from "../access-control.js";
 import type { Executor } from "../sandbox.js";
 
 /**
@@ -93,7 +94,7 @@ const editSchema = Type.Object({
 	newText: Type.String({ description: "New text to replace the old text with" }),
 });
 
-export function createEditTool(executor: Executor): AgentTool<typeof editSchema> {
+export function createEditTool(executor: Executor, getUserId: () => string | undefined): AgentTool<typeof editSchema> {
 	return {
 		name: "edit",
 		label: "edit",
@@ -105,6 +106,11 @@ export function createEditTool(executor: Executor): AgentTool<typeof editSchema>
 			{ path, oldText, newText }: { label: string; path: string; oldText: string; newText: string },
 			signal?: AbortSignal,
 		) => {
+			// Check access control
+			const userId = getUserId();
+			if (userId) {
+				checkAccess({ userId, path }, "write");
+			}
 			// Read the file
 			const readResult = await executor.exec(`cat ${shellEscape(path)}`, { signal });
 			if (readResult.code !== 0) {

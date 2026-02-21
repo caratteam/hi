@@ -423,6 +423,7 @@ export function getOrCreateRunner(sandboxConfig: SandboxConfig, channelId: strin
 const PROVIDER_ENV_KEYS: Record<string, string> = {
 	fal: "FAL_KEY",
 	openai: "OPENAI_API_KEY",
+	carat: "CARAT_AGENT_TOKEN",
 };
 
 function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {

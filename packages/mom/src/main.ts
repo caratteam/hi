@@ -147,7 +147,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				if (messageTs) {
 					await slack.updateMessage(event.channel, messageTs, displayText);
 				} else {
-					messageTs = await slack.postMessage(event.channel, displayText);
+					// If user mentioned us in a thread, reply in that thread
+					if (event.thread_ts) {
+						messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
+					} else {
+						messageTs = await slack.postMessage(event.channel, displayText);
+					}
 				}
 
 				if (shouldLog && messageTs) {
@@ -164,7 +169,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				if (messageTs) {
 					await slack.updateMessage(event.channel, messageTs, displayText);
 				} else {
-					messageTs = await slack.postMessage(event.channel, displayText);
+					// If user mentioned us in a thread, reply in that thread
+					if (event.thread_ts) {
+						messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
+					} else {
+						messageTs = await slack.postMessage(event.channel, displayText);
+					}
 				}
 			});
 			await updatePromise;

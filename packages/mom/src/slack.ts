@@ -13,6 +13,7 @@ export interface SlackEvent {
 	type: "mention" | "dm";
 	channel: string;
 	ts: string;
+	thread_ts?: string; // If this is in a thread, the parent message timestamp
 	user: string;
 	text: string;
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
@@ -277,6 +278,7 @@ export class SlackBot {
 				channel: string;
 				user: string;
 				ts: string;
+				thread_ts?: string;
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
@@ -290,6 +292,7 @@ export class SlackBot {
 				type: "mention",
 				channel: e.channel,
 				ts: e.ts,
+				thread_ts: e.thread_ts,
 				user: e.user,
 				text: e.text.replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,
@@ -336,6 +339,7 @@ export class SlackBot {
 				channel: string;
 				user?: string;
 				ts: string;
+				thread_ts?: string;
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
@@ -369,6 +373,7 @@ export class SlackBot {
 				type: isDM ? "dm" : "mention",
 				channel: e.channel,
 				ts: e.ts,
+				thread_ts: e.thread_ts,
 				user: e.user,
 				text: (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,

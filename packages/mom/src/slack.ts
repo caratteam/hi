@@ -790,13 +790,20 @@ async function classifyReaction(emoji: string, getApiKey?: () => Promise<string>
 	}
 
 	try {
+		const isOAuth = apiKey.includes("sk-ant-oat");
+		const headers: Record<string, string> = {
+			"anthropic-version": "2023-06-01",
+			"content-type": "application/json",
+		};
+		if (isOAuth) {
+			headers["authorization"] = `Bearer ${apiKey}`;
+		} else {
+			headers["x-api-key"] = apiKey;
+		}
+
 		const response = await fetch("https://api.anthropic.com/v1/messages", {
 			method: "POST",
-			headers: {
-				"x-api-key": apiKey,
-				"anthropic-version": "2023-06-01",
-				"content-type": "application/json",
-			},
+			headers,
 			body: JSON.stringify({
 				model: "claude-haiku-4-20250414",
 				max_tokens: 50,

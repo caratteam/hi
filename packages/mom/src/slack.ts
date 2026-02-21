@@ -278,9 +278,14 @@ export class SlackBot {
 				for (const line of lines) {
 					try {
 						const entry = JSON.parse(line);
-						// Filter by thread context
+						// Filter by thread context (including parent message whose ts == threadTs)
 						const entryThread = entry.thread_ts;
-						if (threadTs ? entryThread !== threadTs : entryThread) continue;
+						const entryTs = entry.ts;
+						if (threadTs) {
+							if (entryThread !== threadTs && entryTs !== threadTs) continue;
+						} else {
+							if (entryThread) continue;
+						}
 
 						const who = entry.isBot ? "Mom(bot)" : (entry.userName || entry.user || "unknown");
 						const text = (entry.text || "").substring(0, 200);
@@ -311,14 +316,25 @@ export class SlackBot {
 			const recentLines = lines.slice(-30);
 
 			// Filter to same conversation context (same thread or top-level)
+			// A message belongs to a thread if:
+			//   - its thread_ts matches, OR
+			//   - its ts equals threadTs (it's the parent message of the thread)
 			const relevantEntries: Array<{ isBot: boolean }> = [];
 			for (const line of recentLines) {
 				try {
 					const entry = JSON.parse(line);
 					const entryThread = entry.thread_ts;
-					// Match: both top-level (no thread_ts), or same thread
-					if (threadTs ? entryThread === threadTs : !entryThread) {
-						relevantEntries.push(entry);
+					const entryTs = entry.ts;
+					if (threadTs) {
+						// Looking for messages in a specific thread
+						if (entryThread === threadTs || entryTs === threadTs) {
+							relevantEntries.push(entry);
+						}
+					} else {
+						// Looking for top-level messages only
+						if (!entryThread) {
+							relevantEntries.push(entry);
+						}
 					}
 				} catch { continue; }
 			}

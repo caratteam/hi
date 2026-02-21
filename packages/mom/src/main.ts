@@ -117,6 +117,19 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 	let accumulatedText = "";
 	let isWorking = true;
 	const workingIndicator = " ...";
+
+	/** Slack's max text length for chat.postMessage / chat.update */
+	const SLACK_MAX_TEXT = 39000;
+
+	/** Trim the front of text to fit within Slack's message limit, keeping the latest content visible */
+	const trimFront = (text: string): string => {
+		if (text.length <= SLACK_MAX_TEXT) return text;
+		const trimmed = text.slice(text.length - SLACK_MAX_TEXT + 50);
+		// Try to find the first newline to avoid cutting mid-line
+		const firstNewline = trimmed.indexOf("\n");
+		const cleanStart = firstNewline > 0 && firstNewline < 200 ? trimmed.slice(firstNewline + 1) : trimmed;
+		return `_... (earlier content trimmed)_\n${cleanStart}`;
+	};
 	let updatePromise = Promise.resolve();
 
 	const user = slack.getUser(event.user);
@@ -140,47 +153,93 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		users: slack.getAllUsers().map((u) => ({ id: u.id, userName: u.userName, displayName: u.displayName })),
 
 		respond: async (text: string, shouldLog = true) => {
+			let lastError: unknown;
 			updatePromise = updatePromise.then(async () => {
 				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+				accumulatedText = trimFront(accumulatedText);
+				let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
-				if (messageTs) {
-					await slack.updateMessage(event.channel, messageTs, displayText);
-				} else {
-					// If user mentioned us in a thread, reply in that thread
-					if (event.thread_ts) {
-						messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
+				const tryUpdate = async (txt: string) => {
+					if (messageTs) {
+						await slack.updateMessage(event.channel, messageTs, txt);
+					} else if (event.thread_ts) {
+						messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
 					} else {
-						messageTs = await slack.postMessage(event.channel, displayText);
+						messageTs = await slack.postMessage(event.channel, txt);
+					}
+				};
+
+				try {
+					await tryUpdate(displayText);
+				} catch (err) {
+					const errMsg = err instanceof Error ? err.message : String(err);
+					const errData = (err as { data?: unknown }).data;
+					const isTooLong = errMsg.includes("msg_too_long") ||
+						(errData && JSON.stringify(errData).includes("msg_too_long"));
+					if (isTooLong) {
+						// Halve the accumulated text and retry
+						accumulatedText = trimFront(accumulatedText.slice(Math.floor(accumulatedText.length / 2)));
+						displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+						log.logWarning(`respond msg_too_long, retrying with ${displayText.length} chars`);
+						await tryUpdate(displayText);
+					} else {
+						throw err;
 					}
 				}
 
 				if (shouldLog && messageTs) {
 					slack.logBotResponse(event.channel, text, messageTs, event.thread_ts);
 				}
-			});
+			}).catch((err) => { lastError = err; });
 			await updatePromise;
+			if (lastError) throw lastError;
 		},
 
 		replaceMessage: async (text: string) => {
+			let lastError: unknown;
 			updatePromise = updatePromise.then(async () => {
-				accumulatedText = text;
-				const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-				if (messageTs) {
-					await slack.updateMessage(event.channel, messageTs, displayText);
-				} else {
-					// If user mentioned us in a thread, reply in that thread
-					if (event.thread_ts) {
-						messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
+				accumulatedText = trimFront(text);
+				let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+
+				const tryUpdate = async (txt: string) => {
+					if (messageTs) {
+						await slack.updateMessage(event.channel, messageTs, txt);
+					} else if (event.thread_ts) {
+						messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
 					} else {
-						messageTs = await slack.postMessage(event.channel, displayText);
+						messageTs = await slack.postMessage(event.channel, txt);
 					}
+				};
+
+				try {
+					await tryUpdate(displayText);
+				} catch (err) {
+					const errMsg = err instanceof Error ? err.message : String(err);
+					const errData = (err as { data?: unknown }).data;
+					const isTooLong = errMsg.includes("msg_too_long") ||
+						(errData && JSON.stringify(errData).includes("msg_too_long"));
+					if (isTooLong) {
+						// Retry with progressively shorter text
+						for (const limit of [30000, 20000, 10000, 4000]) {
+							try {
+								displayText = trimFront(text.length > limit ? text.slice(text.length - limit) : text);
+								log.logWarning(`replaceMessage msg_too_long, retrying with ${limit} chars`);
+								await tryUpdate(displayText);
+								return;
+							} catch {
+								continue;
+							}
+						}
+					}
+					throw err;
 				}
-			});
+			}).catch((err) => { lastError = err; });
 			await updatePromise;
+			if (lastError) throw lastError;
 		},
 
 		respondInThread: async (text: string, force?: boolean) => {
+			let lastError: unknown;
 			updatePromise = updatePromise.then(async () => {
 				if (messageTs) {
 					// When already in a thread, skip sub-thread messages unless forced
@@ -191,8 +250,9 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					const ts = await slack.postInThread(event.channel, threadTs, text);
 					threadMessageTs.push(ts);
 				}
-			});
+			}).catch((err) => { lastError = err; });
 			await updatePromise;
+			if (lastError) throw lastError;
 		},
 
 		setTyping: async (isTyping: boolean) => {
@@ -207,7 +267,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 							messageTs = await slack.postMessage(event.channel, displayText);
 						}
 					}
-				});
+				}).catch((err) => { log.logWarning("setTyping error", String(err)); });
 				await updatePromise;
 			}
 		},
@@ -223,11 +283,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 					await slack.updateMessage(event.channel, messageTs, displayText);
 				}
-			});
+			}).catch((err) => { log.logWarning("setWorking error", String(err)); });
 			await updatePromise;
 		},
 
 		deleteMessage: async () => {
+			let lastError: unknown;
 			updatePromise = updatePromise.then(async () => {
 				// Delete thread messages first (in reverse order)
 				for (let i = threadMessageTs.length - 1; i >= 0; i--) {
@@ -243,8 +304,9 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					await slack.deleteMessage(event.channel, messageTs);
 					messageTs = null;
 				}
-			});
+			}).catch((err) => { lastError = err; });
 			await updatePromise;
+			if (lastError) throw lastError;
 		},
 	};
 }

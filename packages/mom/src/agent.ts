@@ -462,6 +462,36 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
 	const contextFile = join(channelDir, "context.jsonl");
 	const sessionManager = SessionManager.open(contextFile, channelDir);
+
+	// Monkey-patch _persist to strip large binary data before writing to disk.
+	// Without this, reading images/videos via the "read" tool writes megabytes of base64
+	// into context.jsonl, which can blow up the context on reload.
+	const originalPersist = (sessionManager as any)._persist.bind(sessionManager);
+	(sessionManager as any)._persist = (entry: any) => {
+		if (entry?.type === "message") {
+			const content = entry.message?.content;
+			if (Array.isArray(content)) {
+				let modified = false;
+				const stripped = content.map((c: any) => {
+					// Strip any content block that has a large base64 data field (images, video, etc.)
+					if (c?.data && typeof c.data === "string" && c.data.length > 1000) {
+						modified = true;
+						const sizeKB = Math.round(c.data.length / 1024);
+						const label = c.type || "binary";
+						const mime = c.mimeType || "";
+						return { type: "text", text: `[${label}${mime ? `: ${mime}` : ""}, ${sizeKB}KB base64 stripped]` };
+					}
+					return c;
+				});
+				if (modified) {
+					const strippedEntry = { ...entry, message: { ...entry.message, content: stripped } };
+					return originalPersist(strippedEntry);
+				}
+			}
+		}
+		return originalPersist(entry);
+	};
+
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
 	// Create AuthStorage and ModelRegistry
@@ -516,14 +546,28 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	});
 
 	// Mutable per-run state - event handler references this
-	const runState = {
-		ctx: null as SlackContext | null,
-		logCtx: null as { channelId: string; userName?: string; channelName?: string } | null,
-		queue: null as {
+	const runState: {
+		ctx: SlackContext | null;
+		logCtx: { channelId: string; userName?: string; channelName?: string } | null;
+		queue: {
 			enqueue(fn: () => Promise<void>, errorContext: string): void;
 			enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
-		} | null,
-		pendingTools: new Map<string, { toolName: string; args: unknown; startTime: number }>(),
+		} | null;
+		pendingTools: Map<string, { toolName: string; args: unknown; startTime: number }>;
+		totalUsage: {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+		};
+		stopReason: string;
+		errorMessage: string | undefined;
+	} = {
+		ctx: null,
+		logCtx: null,
+		queue: null,
+		pendingTools: new Map(),
 		totalUsage: {
 			input: 0,
 			output: 0,
@@ -532,7 +576,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "stop",
-		errorMessage: undefined as string | undefined,
+		errorMessage: undefined,
 	};
 
 	// Subscribe to events ONCE
@@ -700,6 +744,25 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			// This picks up any messages synced above
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
+				// Strip large binary data (images, video, etc.) from historical messages to avoid
+				// bloating API requests. Current turn images are passed separately via prompt().
+				let strippedCount = 0;
+				for (const msg of reloadedSession.messages) {
+					const content = (msg as any).content;
+					if (!content || !Array.isArray(content)) continue;
+					for (let i = content.length - 1; i >= 0; i--) {
+						const block = content[i];
+						if (block.data && typeof block.data === "string" && block.data.length > 1000) {
+							const label = block.type || "binary";
+							const mime = block.mimeType || "";
+							content.splice(i, 1, { type: "text", text: `[${label}${mime ? `: ${mime}` : ""} — removed from context]` });
+							strippedCount++;
+						}
+					}
+				}
+				if (strippedCount > 0) {
+					log.logInfo(`[${channelId}] Stripped ${strippedCount} large data block(s) from context`);
+				}
 				agent.replaceMessages(reloadedSession.messages);
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
@@ -828,18 +891,18 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			};
 			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
 
-			// Try prompt, handle msg_too_long by trimming context
+			// Try prompt, handle recoverable errors by fixing context and retrying
 			let retries = 0;
 			const maxRetries = 3;
 			while (true) {
 				await session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined);
 
-				// Check if msg_too_long error occurred
-				if (
-					runState.stopReason === "error" &&
-					runState.errorMessage?.includes("msg_too_long") &&
-					retries < maxRetries
-				) {
+				const currentStopReason = (runState as { stopReason: string }).stopReason;
+				const currentErrorMessage = (runState as { errorMessage?: string }).errorMessage;
+
+				if (currentStopReason !== "error" || retries >= maxRetries) break;
+
+				if (currentErrorMessage?.includes("msg_too_long")) {
 					retries++;
 					const messages = session.messages;
 					const keepCount = Math.max(2, Math.floor(messages.length / 2));
@@ -848,12 +911,11 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					log.logInfo(
 						`[${channelId}] Context too long, trimmed to ${trimmed.length} messages (retry ${retries}/${maxRetries})`,
 					);
-
-					// Reset error state for retry
 					runState.stopReason = "";
 					runState.errorMessage = undefined;
 					continue;
 				}
+
 				break;
 			}
 

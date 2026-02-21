@@ -22,6 +22,9 @@ fi
 # 절대 경로로 변환
 DATA_DIR=$(cd "$DATA_DIR" && pwd)
 
+# 로그 파일 경로
+LOG_FILE="$DATA_DIR/mom.log"
+
 # Docker 컨테이너 상태 확인 및 시작
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
@@ -34,8 +37,21 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   fi
 fi
 
-# Mom 실행
+# Mom 백그라운드 실행 및 로그 따라가기
 echo "Starting Mom with data directory: $DATA_DIR"
+echo "Logs are also saved to: $LOG_FILE"
+echo "Press Ctrl+C to detach (Mom will continue running in background)"
 echo "─────────────────────────────────────────────────────────"
 cd "$REPO_ROOT"
-npx tsx packages/mom/src/main.ts --sandbox=docker:${CONTAINER_NAME} "$DATA_DIR"
+
+# 백그라운드로 시작
+nohup npx tsx packages/mom/src/main.ts --sandbox=docker:${CONTAINER_NAME} "$DATA_DIR" >> "$LOG_FILE" 2>&1 &
+PID=$!
+
+# 잠깐 대기 후 로그 따라가기
+sleep 1
+echo "Mom started with PID: $PID"
+echo ""
+
+# tail로 로그 실시간 표시 (Ctrl+C로 종료해도 Mom은 계속 실행됨)
+tail -f "$LOG_FILE"

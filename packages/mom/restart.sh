@@ -6,14 +6,19 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${1:-$HOME/.mom-data}"
 
 # Mom 프로세스 찾기 및 종료
 echo "Stopping Mom..."
-pkill -f "tsx.*mom/src/main.ts" || echo "No running Mom process found"
+if pkill -f "tsx.*mom/src/main.ts"; then
+  echo "Mom process stopped"
+else
+  echo "No running Mom process found"
+fi
 
-# 잠시 대기
+# 완전히 종료될 때까지 대기
 sleep 2
 
-# 다시 시작
+# 다시 시작 (백그라운드)
 echo "Restarting Mom..."
-"$SCRIPT_DIR/start.sh" "$@"
+"$SCRIPT_DIR/start.sh" "$DATA_DIR"

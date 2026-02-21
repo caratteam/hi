@@ -841,7 +841,7 @@ export class SlackBot {
 	private async handleReaction(reactorUserId: string, emoji: string, channel: string, messageTs: string): Promise<void> {
 		// Find the requester: the last non-bot user who spoke BEFORE the reacted message.
 		// Strategy:
-		// 1. Try thread context (conversations.replies) - for in-thread conversations
+		// 1. Try thread context (conversations.replies with thread parent) - for in-thread conversations
 		// 2. Fall back to channel history (conversations.history) - for top-level messages
 		let requesterId: string | null = null;
 
@@ -857,11 +857,31 @@ export class SlackBot {
 			return null;
 		};
 
+		// Find the thread parent ts from log.jsonl (the reacted message may be inside a thread)
+		let threadParentTs: string | undefined;
 		try {
-			// 1. Try thread replies first
+			const logPath = join(this.workingDir, channel, "log.jsonl");
+			if (existsSync(logPath)) {
+				const content = readFileSync(logPath, "utf-8");
+				const lines = content.trim().split("\n").slice(-50);
+				for (const line of lines) {
+					try {
+						const entry = JSON.parse(line);
+						if (entry.ts === messageTs && entry.thread_ts) {
+							threadParentTs = entry.thread_ts;
+							break;
+						}
+					} catch { continue; }
+				}
+			}
+		} catch { /* ignore */ }
+
+		try {
+			// 1. Try thread replies first (use thread parent ts, not the message ts itself)
+			const threadTs = threadParentTs || messageTs;
 			const threadResult = await this.webClient.conversations.replies({
 				channel,
-				ts: messageTs,
+				ts: threadTs,
 				limit: 100,
 			});
 			const threadMessages = threadResult.messages as Array<{ user?: string; bot_id?: string; ts: string }> | undefined;

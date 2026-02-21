@@ -251,6 +251,18 @@ export class SlackBot {
 		}
 	}
 
+	async addReaction(channel: string, ts: string, emoji: string): Promise<void> {
+		try {
+			await this.webClient.reactions.add({ channel, timestamp: ts, name: emoji });
+		} catch { /* ignore - reaction may already exist */ }
+	}
+
+	async removeReaction(channel: string, ts: string, emoji: string): Promise<void> {
+		try {
+			await this.webClient.reactions.remove({ channel, timestamp: ts, name: emoji });
+		} catch { /* ignore - reaction may not exist */ }
+	}
+
 	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {
 		const fileName = title || basename(filePath);
 		const fileContent = readFileSync(filePath);
@@ -462,12 +474,13 @@ export class SlackBot {
 				return;
 			}
 
-			// SYNC: Check if busy
-			if (this.handler.isRunning(e.channel)) {
-				this.postMessage(e.channel, "_Already working. Say `@mom stop` to cancel._");
-			} else {
-				this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
-			}
+			// Enqueue (ChannelQueue handles sequential processing)
+			const queued = this.handler.isRunning(e.channel);
+			if (queued) this.addReaction(e.channel, e.ts, "hourglass_flowing_sand");
+			this.getQueue(e.channel).enqueue(async () => {
+				if (queued) this.removeReaction(e.channel, e.ts, "hourglass_flowing_sand");
+				await this.handler.handleEvent(slackEvent, this);
+			});
 
 			ack();
 		});
@@ -597,11 +610,12 @@ export class SlackBot {
 			}
 
 			if (shouldHandle) {
-				if (this.handler.isRunning(e.channel)) {
-					this.postMessage(e.channel, isDM ? "_Already working. Say `stop` to cancel._" : "_Already working. Say `@mom stop` to cancel._");
-				} else {
-					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
-				}
+				const queued = this.handler.isRunning(e.channel);
+				if (queued) this.addReaction(e.channel, e.ts, "hourglass_flowing_sand");
+				this.getQueue(e.channel).enqueue(async () => {
+					if (queued) this.removeReaction(e.channel, e.ts, "hourglass_flowing_sand");
+					await this.handler.handleEvent(slackEvent, this);
+				});
 			}
 		});
 	}

@@ -195,7 +195,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				updatePromise = updatePromise.then(async () => {
 					if (!messageTs) {
 						accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
-						messageTs = await slack.postMessage(event.channel, accumulatedText + workingIndicator);
+						const displayText = accumulatedText + workingIndicator;
+						if (event.thread_ts) {
+							messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
+						} else {
+							messageTs = await slack.postMessage(event.channel, displayText);
+						}
 					}
 				});
 				await updatePromise;

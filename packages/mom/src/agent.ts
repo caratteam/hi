@@ -750,11 +750,18 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 							await fn();
 						} catch (err) {
 							const errMsg = err instanceof Error ? err.message : String(err);
+							const errData = (err as { data?: unknown }).data;
 							log.logWarning(`Slack API error (${errorContext})`, errMsg);
-							try {
-								await ctx.respondInThread(`_Error: ${errMsg}_`);
-							} catch {
-								// Ignore
+							if (errData) {
+								log.logWarning(`Slack API error details (${errorContext})`, JSON.stringify(errData).substring(0, 500));
+							}
+							// Don't try to respondInThread for msg_too_long - it will likely fail too
+							if (!errMsg.includes("msg_too_long")) {
+								try {
+									await ctx.respondInThread(`_Error: ${errMsg}_`);
+								} catch {
+									// Ignore
+								}
 							}
 						}
 					});

@@ -153,6 +153,12 @@ export class SlackBot {
 	private queues = new Map<string, ChannelQueue>();
 	private getApiKey?: () => Promise<string>;
 
+	/**
+	 * Max number of non-bot messages after bot's last reply before disengaging.
+	 * If more than this many messages pass without bot involvement, stop auto-responding.
+	 */
+	private static readonly CONVERSATION_MAX_GAP = 5;
+
 	constructor(
 		handler: MomHandler,
 		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore; getApiKey?: () => Promise<string> },
@@ -205,15 +211,27 @@ export class SlackBot {
 
 	async postMessage(channel: string, text: string): Promise<string> {
 		const truncated = truncateForSlack(text);
-		log.logInfo(`[slack] postMessage: ${text.length} chars (truncated: ${truncated.length})`);
-		const result = await this.webClient.chat.postMessage({ channel, text: truncated });
-		return result.ts as string;
+		log.logInfo(`[slack] postMessage: ${text.length} chars -> ${truncated.length} chars`);
+		try {
+			const result = await this.webClient.chat.postMessage({ channel, text: truncated });
+			return result.ts as string;
+		} catch (err) {
+			const errData = (err as { data?: unknown }).data;
+			log.logWarning(`[slack] postMessage FAILED (${truncated.length} chars)`, errData ? JSON.stringify(errData).substring(0, 500) : String(err));
+			throw err;
+		}
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
 		const truncated = truncateForSlack(text);
-		log.logInfo(`[slack] updateMessage: ${text.length} chars (truncated: ${truncated.length})`);
-		await this.webClient.chat.update({ channel, ts, text: truncated });
+		log.logInfo(`[slack] updateMessage: ${text.length} chars -> ${truncated.length} chars`);
+		try {
+			await this.webClient.chat.update({ channel, ts, text: truncated });
+		} catch (err) {
+			const errData = (err as { data?: unknown }).data;
+			log.logWarning(`[slack] updateMessage FAILED (${truncated.length} chars)`, errData ? JSON.stringify(errData).substring(0, 500) : String(err));
+			throw err;
+		}
 	}
 
 	async deleteMessage(channel: string, ts: string): Promise<void> {
@@ -222,9 +240,15 @@ export class SlackBot {
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
 		const truncated = truncateForSlack(text);
-		log.logInfo(`[slack] postInThread: ${text.length} chars (truncated: ${truncated.length})`);
-		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncated });
-		return result.ts as string;
+		log.logInfo(`[slack] postInThread: ${text.length} chars -> ${truncated.length} chars`);
+		try {
+			const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncated });
+			return result.ts as string;
+		} catch (err) {
+			const errData = (err as { data?: unknown }).data;
+			log.logWarning(`[slack] postInThread FAILED (${truncated.length} chars)`, errData ? JSON.stringify(errData).substring(0, 500) : String(err));
+			throw err;
+		}
 	}
 
 	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {
@@ -236,6 +260,81 @@ export class SlackBot {
 			filename: fileName,
 			title: fileName,
 		});
+	}
+
+	/**
+	 * Use Haiku to determine if a message is directed at the bot in an ongoing conversation.
+	 * Looks at recent conversation context to decide.
+	 */
+	private async isMessageDirectedAtBot(messageText: string, userName: string, channel: string, threadTs?: string): Promise<boolean> {
+		// Get recent conversation context from log.jsonl, filtered by thread
+		let context = "";
+		try {
+			const logPath = join(this.workingDir, channel, "log.jsonl");
+			if (existsSync(logPath)) {
+				const content = readFileSync(logPath, "utf-8");
+				const lines = content.trim().split("\n").slice(-30);
+				const msgs: string[] = [];
+				for (const line of lines) {
+					try {
+						const entry = JSON.parse(line);
+						// Filter by thread context
+						const entryThread = entry.thread_ts;
+						if (threadTs ? entryThread !== threadTs : entryThread) continue;
+
+						const who = entry.isBot ? "Mom(bot)" : (entry.userName || entry.user || "unknown");
+						const text = (entry.text || "").substring(0, 200);
+						msgs.push(`${who}: ${text}`);
+					} catch { continue; }
+				}
+				// Take last 10 relevant messages
+				context = msgs.slice(-10).join("\n");
+			}
+		} catch { /* ignore */ }
+
+		return isMessageForBot(messageText, userName, context, this.getApiKey);
+	}
+
+	/**
+	 * Check if Mom is in an active conversation in this channel/thread.
+	 * Looks at log.jsonl to count non-bot messages since Mom's last reply.
+	 * Filters by thread_ts to avoid cross-thread interference.
+	 * Returns the number of messages since last bot reply, or -1 if not in conversation.
+	 */
+	private getMessagesSinceLastReply(channel: string, threadTs?: string): number {
+		try {
+			const logPath = join(this.workingDir, channel, "log.jsonl");
+			if (!existsSync(logPath)) return -1;
+
+			const content = readFileSync(logPath, "utf-8");
+			const lines = content.trim().split("\n");
+			const recentLines = lines.slice(-30);
+
+			// Filter to same conversation context (same thread or top-level)
+			const relevantEntries: Array<{ isBot: boolean }> = [];
+			for (const line of recentLines) {
+				try {
+					const entry = JSON.parse(line);
+					const entryThread = entry.thread_ts;
+					// Match: both top-level (no thread_ts), or same thread
+					if (threadTs ? entryThread === threadTs : !entryThread) {
+						relevantEntries.push(entry);
+					}
+				} catch { continue; }
+			}
+
+			let messagesSinceBot = 0;
+			for (let i = relevantEntries.length - 1; i >= 0; i--) {
+				if (relevantEntries[i].isBot) {
+					return messagesSinceBot;
+				}
+				messagesSinceBot++;
+			}
+
+			return -1; // No bot message found in this context
+		} catch {
+			return -1;
+		}
 	}
 
 	/**
@@ -251,10 +350,11 @@ export class SlackBot {
 	/**
 	 * Log a bot response to log.jsonl
 	 */
-	logBotResponse(channel: string, text: string, ts: string): void {
+	logBotResponse(channel: string, text: string, ts: string, threadTs?: string): void {
 		this.logToFile(channel, {
 			date: new Date().toISOString(),
 			ts,
+			thread_ts: threadTs,
 			user: "bot",
 			text,
 			attachments: [],
@@ -387,7 +487,7 @@ export class SlackBot {
 		});
 
 		// All messages (for logging) + DMs (for triggering)
-		this.socketClient.on("message", ({ event, ack }) => {
+		this.socketClient.on("message", async ({ event, ack }) => {
 			const e = event as {
 				text?: string;
 				channel: string;
@@ -437,34 +537,56 @@ export class SlackBot {
 			// Also downloads attachments in background and stores local paths
 			slackEvent.attachments = this.logUserMessage(slackEvent);
 
+			// Ack immediately - Slack expects ack within 3 seconds
+			ack();
+
 			// Only trigger processing for messages AFTER startup (not replayed old messages)
 			if (this.startupTs && e.ts < this.startupTs) {
 				log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
-				ack();
 				return;
 			}
 
-			// Only trigger handler for DMs
+			// Check for stop command - execute immediately, don't queue!
 			if (isDM) {
-				// Check for stop command - execute immediately, don't queue!
 				if (slackEvent.text.toLowerCase().trim() === "stop") {
 					if (this.handler.isRunning(e.channel)) {
-						this.handler.handleStop(e.channel, this); // Don't await, don't queue
+						this.handler.handleStop(e.channel, this);
 					} else {
 						this.postMessage(e.channel, "_Nothing running_");
 					}
-					ack();
 					return;
 				}
+			}
 
+			// Determine if we should handle this message
+			let shouldHandle = isDM;
+
+			if (!isDM && !isBotMention) {
+				const msgGap = this.getMessagesSinceLastReply(e.channel, e.thread_ts);
+				if (msgGap >= 0 && msgGap <= SlackBot.CONVERSATION_MAX_GAP) {
+					// Mom recently participated in this thread/channel. Ask Haiku if this message is directed at Mom.
+					const userName = this.users.get(e.user)?.userName || e.user;
+					const directed = await this.isMessageDirectedAtBot(e.text || "", userName, e.channel, e.thread_ts);
+					if (directed) {
+						shouldHandle = true;
+						log.logInfo(
+							`[${e.channel}] Implicit conversation with ${userName} (${msgGap} msgs since last reply, Haiku: directed)`,
+						);
+					} else {
+						log.logInfo(
+							`[${e.channel}] Skipping implicit - Haiku says not directed (${msgGap} msgs gap)`,
+						);
+					}
+				}
+			}
+
+			if (shouldHandle) {
 				if (this.handler.isRunning(e.channel)) {
-					this.postMessage(e.channel, "_Already working. Say `stop` to cancel._");
+					this.postMessage(e.channel, isDM ? "_Already working. Say `stop` to cancel._" : "_Already working. Say `@mom stop` to cancel._");
 				} else {
 					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}
 			}
-
-			ack();
 		});
 	}
 
@@ -479,6 +601,7 @@ export class SlackBot {
 		this.logToFile(event.channel, {
 			date: new Date(parseFloat(event.ts) * 1000).toISOString(),
 			ts: event.ts,
+			thread_ts: event.thread_ts,
 			user: event.user,
 			userName: user?.userName,
 			displayName: user?.displayName,
@@ -784,7 +907,15 @@ export class SlackBot {
  * Returns a natural language interpretation of the emoji's intent,
  * or "ignore" if the emoji is not meaningful enough to act on.
  */
-async function interpretReaction(emoji: string, getApiKey?: () => Promise<string>): Promise<string> {
+/**
+ * Call Claude Haiku for lightweight classification tasks.
+ * Returns the response text, or fallback on error.
+ */
+async function callHaiku(
+	prompt: string,
+	fallback: string,
+	getApiKey?: () => Promise<string>,
+): Promise<string> {
 	let apiKey = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
 	if (!apiKey && getApiKey) {
 		try {
@@ -794,8 +925,8 @@ async function interpretReaction(emoji: string, getApiKey?: () => Promise<string
 		}
 	}
 	if (!apiKey) {
-		log.logWarning("No Anthropic API key available for reaction interpretation, defaulting to ignore");
-		return "ignore";
+		log.logWarning("No Anthropic API key available for Haiku call");
+		return fallback;
 	}
 
 	try {
@@ -820,10 +951,32 @@ async function interpretReaction(emoji: string, getApiKey?: () => Promise<string
 			body: JSON.stringify({
 				model: "claude-haiku-4-5",
 				max_tokens: 100,
-				messages: [
-					{
-						role: "user",
-						content: `A user reacted to an AI assistant's Slack message with the emoji :${emoji}:
+				messages: [{ role: "user", content: prompt }],
+			}),
+		});
+
+		if (!response.ok) {
+			const errorBody = await response.text().catch(() => "");
+			log.logWarning(
+				`Haiku API error: ${response.status} (auth: ${isOAuth ? "oauth" : "api-key"})`,
+				errorBody.substring(0, 200),
+			);
+			return fallback;
+		}
+
+		const data = (await response.json()) as { content: Array<{ type: string; text: string }> };
+		return data.content?.[0]?.text?.trim() || fallback;
+	} catch (err) {
+		log.logWarning("Haiku call error", err instanceof Error ? err.message : String(err));
+		return fallback;
+	}
+}
+
+/**
+ * Interpret a Slack emoji reaction using Haiku.
+ */
+async function interpretReaction(emoji: string, getApiKey?: () => Promise<string>): Promise<string> {
+	const prompt = `A user reacted to an AI assistant's Slack message with the emoji :${emoji}:
 
 Interpret what the user likely means by this reaction. Consider possibilities like:
 - Approval/agreement (go ahead, yes, proceed)
@@ -835,24 +988,36 @@ Interpret what the user likely means by this reaction. Consider possibilities li
 - Other emotions or intentions
 
 Reply with a SHORT phrase describing the user's intent (e.g. "승인", "거절", "재미있다는 반응", "감탄", "궁금해하는 반응").
-If the emoji is too ambiguous or meaningless to interpret, reply with exactly "ignore".`,
-					},
-				],
-			}),
-		});
+If the emoji is too ambiguous or meaningless to interpret, reply with exactly "ignore".`;
 
-		if (!response.ok) {
-			const errorBody = await response.text().catch(() => "");
-			log.logWarning(`Reaction interpretation API error: ${response.status} (auth: ${isOAuth ? "oauth" : "api-key"}, key prefix: ${apiKey.substring(0, 15)}...)`, errorBody);
-			return "ignore";
-		}
+	const result = await callHaiku(prompt, "ignore", getApiKey);
+	return result.toLowerCase() === "ignore" ? "ignore" : result;
+}
 
-		const data = (await response.json()) as { content: Array<{ type: string; text: string }> };
-		const text = data.content?.[0]?.text?.trim() || "ignore";
+/**
+ * Determine if a channel message (without @mention) is directed at the bot,
+ * given recent conversation context.
+ */
+async function isMessageForBot(
+	messageText: string,
+	userName: string,
+	recentContext: string,
+	getApiKey?: () => Promise<string>,
+): Promise<boolean> {
+	const prompt = `You are "Mom", an AI assistant in a Slack channel. You recently participated in a conversation.
 
-		return text.toLowerCase() === "ignore" ? "ignore" : text;
-	} catch (err) {
-		log.logWarning("Reaction interpretation error", err instanceof Error ? err.message : String(err));
-		return "ignore";
-	}
+Recent conversation:
+${recentContext}
+
+New message from ${userName}: "${messageText}"
+
+Is this new message directed at you (Mom, the AI assistant)? Consider:
+- Is the user continuing a conversation with you?
+- Is the user asking you to do something or responding to something you said?
+- Or is this just general chatter between humans that has nothing to do with you?
+
+Reply with exactly "yes" or "no".`;
+
+	const result = await callHaiku(prompt, "no", getApiKey);
+	return result.toLowerCase().startsWith("yes");
 }

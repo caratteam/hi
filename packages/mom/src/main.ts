@@ -156,7 +156,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				}
 
 				if (shouldLog && messageTs) {
-					slack.logBotResponse(event.channel, text, messageTs);
+					slack.logBotResponse(event.channel, text, messageTs, event.thread_ts);
 				}
 			});
 			await updatePromise;

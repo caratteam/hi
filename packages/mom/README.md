@@ -58,6 +58,8 @@ npm install @mariozechner/pi-mom
 
 ## Quick Start
 
+### Easy Mode (Recommended)
+
 ```bash
 # Set environment variables
 export MOM_SLACK_APP_TOKEN=xapp-...
@@ -66,7 +68,16 @@ export MOM_SLACK_BOT_TOKEN=xoxb-...
 export ANTHROPIC_API_KEY=sk-ant-...
 # Option 2: use /login command in pi agent, then copy/link auth.json to ~/.pi/mom/
 
-# Create Docker sandbox (recommended)
+# Run with simple script (handles Docker setup automatically)
+./start.sh [data-dir]  # defaults to ~/.mom-data
+
+# Mom will install any tools she needs herself (git, jq, etc.)
+```
+
+### Manual Setup
+
+```bash
+# Create Docker sandbox manually
 docker run -d \
   --name mom-sandbox \
   -v $(pwd)/data:/workspace \
@@ -75,8 +86,6 @@ docker run -d \
 
 # Run mom in Docker mode
 mom --sandbox=docker:mom-sandbox ./data
-
-# Mom will install any tools she needs herself (git, jq, etc.)
 ```
 
 ## CLI Options

@@ -1054,19 +1054,21 @@ async function isMessageForBot(
 	recentContext: string,
 	getApiKey?: () => Promise<string>,
 ): Promise<boolean> {
-	const prompt = `You are "Mom", an AI assistant in a Slack channel. You recently participated in a conversation.
+	const prompt = `You are "나노캐럿(Mom)", an AI assistant in a Slack channel. You recently participated in a conversation.
 
 Recent conversation:
 ${recentContext}
 
 New message from ${userName}: "${messageText}"
 
-Is this new message directed at you (Mom, the AI assistant)? Consider:
+Is this new message directed at you (the AI assistant)? Consider:
+- If your last message invited a response (e.g. "물어보세요", "알려주세요", "해볼까요?", "도와드릴까요?"), the next message from the same user is almost certainly directed at you.
 - Is the user continuing a conversation with you?
-- Is the user asking you to do something or responding to something you said?
-- Or is this just general chatter between humans that has nothing to do with you?
+- Is the user asking you to do something, requesting information, or responding to something you said?
+- Does the message contain a command, question, or request that an AI assistant would handle (e.g. DB queries, file operations, code changes, content generation)?
+- Or is this clearly general chatter between humans that has nothing to do with you?
 
-Reply with exactly "yes" or "no".`;
+When in doubt, answer "yes". Reply with exactly "yes" or "no".`;
 
 	const result = await callHaiku(prompt, "no", getApiKey);
 	return result.toLowerCase().startsWith("yes");

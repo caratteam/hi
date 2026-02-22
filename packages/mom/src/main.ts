@@ -273,7 +273,9 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		},
 
 		uploadFile: async (filePath: string, title?: string) => {
-			await slack.uploadFile(event.channel, filePath, title);
+			// Upload in the current thread (or top-level if no thread)
+			const threadTs = event.thread_ts || messageTs || undefined;
+			await slack.uploadFile(event.channel, filePath, title, threadTs);
 		},
 
 		setWorking: async (working: boolean) => {

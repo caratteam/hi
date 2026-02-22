@@ -16,6 +16,9 @@ jobs:
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           script: |
             cd ~/pi-mono
+            git fetch origin hansol
+            git checkout hansol
             git pull origin hansol
+            npm install
             cd packages/mom
             ./start.sh

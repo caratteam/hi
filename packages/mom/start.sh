@@ -6,6 +6,11 @@
 
 set -e
 
+# Load environment variables (Slack tokens, etc.)
+if [ -f "$HOME/.mom-env" ]; then
+  source "$HOME/.mom-env"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONTAINER_NAME="mom-sandbox"

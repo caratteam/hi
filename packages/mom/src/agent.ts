@@ -424,6 +424,7 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 	fal: "FAL_KEY",
 	openai: "OPENAI_API_KEY",
 	carat: "CARAT_AGENT_TOKEN",
+	anthropic: "ANTHROPIC_API_KEY",
 };
 
 function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
@@ -437,6 +438,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				const cred = authData[provider];
 				if (cred?.type === "api_key" && cred.key) {
 					sandboxEnv[envVar] = cred.key;
+				} else if (cred?.type === "oauth" && cred.access) {
+					// OAuth tokens: inject access token as API key
+					sandboxEnv[envVar] = cred.access;
 				}
 			}
 		}

@@ -1,0 +1,21 @@
+name: Deploy Mom Bot
+
+on:
+  push:
+    branches: [hansol]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Lightsail
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ubuntu
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          script: |
+            cd ~/pi-mono
+            git pull origin hansol
+            cd packages/mom
+            ./start.sh

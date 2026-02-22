@@ -439,8 +439,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				if (cred?.type === "api_key" && cred.key) {
 					sandboxEnv[envVar] = cred.key;
 				} else if (cred?.type === "oauth" && cred.access) {
-					// OAuth tokens: inject access token as API key
+					// OAuth tokens: inject access token + refresh token + expiry
 					sandboxEnv[envVar] = cred.access;
+					if (cred.refresh) {
+						sandboxEnv[`${envVar}_REFRESH`] = cred.refresh;
+					}
+					if (cred.expires) {
+						sandboxEnv[`${envVar}_EXPIRES`] = String(cred.expires);
+					}
 				}
 			}
 		}

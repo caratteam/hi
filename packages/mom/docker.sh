@@ -33,8 +33,18 @@ case "$1" in
     echo "Creating container '${CONTAINER_NAME}'..."
     echo "  Data dir: ${DATA_DIR} -> /workspace"
     
+    # Build env-file for Docker (convert export statements to KEY=VALUE)
+    ENV_FILE="$HOME/.mom-env"
+    DOCKER_ENV_FILE="/tmp/.mom-docker-env"
+    if [ -f "$ENV_FILE" ]; then
+      sed 's/^export //' "$ENV_FILE" > "$DOCKER_ENV_FILE"
+    else
+      touch "$DOCKER_ENV_FILE"
+    fi
+
     docker run -d \
       --name "$CONTAINER_NAME" \
+      --env-file "$DOCKER_ENV_FILE" \
       -v "${DATA_DIR}:/workspace" \
       -v "${REPO_ROOT}:/pi-mono" \
       "$IMAGE" \

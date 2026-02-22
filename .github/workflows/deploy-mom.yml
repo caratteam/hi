@@ -15,6 +15,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           script: |
+            source ~/.mom-env
             cd ~/pi-mono
             git fetch origin hansol
             git checkout hansol

@@ -431,6 +431,88 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 const MAX_CONTEXT_MESSAGES = 20;
 
 /**
+ * Sanitize tool_use/tool_result pairs in a message array.
+ *
+ * Claude API requires every tool_result block to have a corresponding tool_use block
+ * in the immediately preceding assistant message. After trimming context to recent N messages,
+ * orphan tool_results (whose tool_use was trimmed) cause 400 errors.
+ *
+ * This function:
+ * 1. Collects all tool_use IDs from assistant messages
+ * 2. Removes tool_result blocks whose tool_use_id is not in the collected set
+ * 3. Removes empty user messages that had only orphan tool_results
+ * 4. Also removes assistant messages with tool_use blocks that have no matching tool_result after them
+ */
+function sanitizeToolPairs(messages: any[], log: any, channelId: string, threadTs: string): any[] {
+	// Collect all tool_use IDs from assistant messages
+	const toolUseIds = new Set<string>();
+	for (const msg of messages) {
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			for (const block of msg.content) {
+				if (block.type === "tool_use" && block.id) {
+					toolUseIds.add(block.id);
+				}
+			}
+		}
+	}
+
+	// Collect all tool_result IDs from user messages
+	const toolResultIds = new Set<string>();
+	for (const msg of messages) {
+		if (msg.role === "user" && Array.isArray(msg.content)) {
+			for (const block of msg.content) {
+				if (block.type === "tool_result" && block.tool_use_id) {
+					toolResultIds.add(block.tool_use_id);
+				}
+			}
+		}
+	}
+
+	let removedResults = 0;
+	let removedUses = 0;
+	const result: any[] = [];
+
+	for (const msg of messages) {
+		if (msg.role === "user" && Array.isArray(msg.content)) {
+			// Remove orphan tool_result blocks (no matching tool_use)
+			const filtered = msg.content.filter((block: any) => {
+				if (block.type === "tool_result" && block.tool_use_id && !toolUseIds.has(block.tool_use_id)) {
+					removedResults++;
+					return false;
+				}
+				return true;
+			});
+			if (filtered.length > 0) {
+				result.push({ ...msg, content: filtered });
+			}
+			// If all content was orphan tool_results, drop the entire message
+		} else if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			// Remove tool_use blocks that have no matching tool_result
+			const filtered = msg.content.filter((block: any) => {
+				if (block.type === "tool_use" && block.id && !toolResultIds.has(block.id)) {
+					removedUses++;
+					return false;
+				}
+				return true;
+			});
+			if (filtered.length > 0) {
+				result.push({ ...msg, content: filtered });
+			}
+		} else {
+			result.push(msg);
+		}
+	}
+
+	if (removedResults > 0 || removedUses > 0) {
+		log.logInfo(
+			`[${channelId}:${threadTs}] Sanitized tool pairs: removed ${removedResults} orphan tool_result(s), ${removedUses} orphan tool_use(s)`,
+		);
+	}
+
+	return result;
+}
+
+/**
  * Apply monkey-patch to SessionManager._persist to strip large binary data.
  * Without this, reading images/videos via the "read" tool writes megabytes of base64
  * into context files, which can blow up the context on reload.
@@ -826,7 +908,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 				// Limit to most recent MAX_CONTEXT_MESSAGES messages
 				const messages = reloadedSession.messages;
-				const trimmedMessages =
+				let trimmedMessages =
 					messages.length > MAX_CONTEXT_MESSAGES
 						? messages.slice(messages.length - MAX_CONTEXT_MESSAGES)
 						: messages;
@@ -835,6 +917,11 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 						`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`,
 					);
 				}
+
+				// Sanitize tool_use/tool_result pairs after trimming.
+				// Claude API requires every tool_result to have a matching tool_use in the previous message.
+				// After slicing, orphan tool_results (whose tool_use was trimmed away) cause 400 errors.
+				trimmedMessages = sanitizeToolPairs(trimmedMessages, log, channelId, threadTs);
 
 				agent.replaceMessages(trimmedMessages);
 				log.logInfo(`[${channelId}:${threadTs}] Loaded ${trimmedMessages.length} messages from context`);
@@ -985,7 +1072,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					retries++;
 					const messages = session.messages;
 					const keepCount = Math.max(2, Math.floor(messages.length / 2));
-					const trimmed = messages.slice(messages.length - keepCount);
+					const trimmed = sanitizeToolPairs(messages.slice(messages.length - keepCount), log, channelId, threadTs);
 					session.agent.replaceMessages(trimmed);
 					log.logInfo(
 						`[${channelId}] Context too long, trimmed to ${trimmed.length} messages (retry ${retries}/${maxRetries})`,

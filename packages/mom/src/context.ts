@@ -126,9 +126,29 @@ export function syncLogToSessionManager(
 	}
 
 	// Take only the most recent MAX_SYNC_MESSAGES
+	const totalThreadMessages = threadMessages.length;
+	const wasTruncated = totalThreadMessages > MAX_SYNC_MESSAGES;
 	const recentMessages = threadMessages.slice(-MAX_SYNC_MESSAGES);
 
 	const newMessages: Array<{ timestamp: number; message: UserMessage }> = [];
+
+	// If messages were truncated, prepend a notice so the LLM knows earlier messages exist
+	if (wasTruncated) {
+		const omitted = totalThreadMessages - MAX_SYNC_MESSAGES;
+		const noticeText = `[... ${omitted}개의 이전 메시지 생략. 이전 대화는 log.jsonl을 검색하세요 ...]`;
+		const noticeTime = recentMessages.length > 0 ? (new Date(recentMessages[0].logMsg.date!).getTime() || Date.now()) - 1 : Date.now();
+		if (!existingMessages.has(noticeText)) {
+			newMessages.push({
+				timestamp: noticeTime,
+				message: {
+					role: "user",
+					content: [{ type: "text", text: noticeText }],
+					timestamp: noticeTime,
+				},
+			});
+			existingMessages.add(noticeText);
+		}
+	}
 
 	for (const { logMsg } of recentMessages) {
 		const slackTs = logMsg.ts!;

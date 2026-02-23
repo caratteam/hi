@@ -179,7 +179,10 @@ class HostExecutor implements Executor {
 class DockerExecutor implements Executor {
 	private envVars: Record<string, string>;
 
-	constructor(private container: string, envVars?: Record<string, string>) {
+	constructor(
+		private container: string,
+		envVars?: Record<string, string>,
+	) {
 		this.envVars = envVars || {};
 	}
 

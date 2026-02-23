@@ -162,7 +162,13 @@ export class SlackBot {
 
 	constructor(
 		handler: MomHandler,
-		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore; getApiKey?: () => Promise<string> },
+		config: {
+			appToken: string;
+			botToken: string;
+			workingDir: string;
+			store: ChannelStore;
+			getApiKey?: () => Promise<string>;
+		},
 	) {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
@@ -218,7 +224,10 @@ export class SlackBot {
 			return result.ts as string;
 		} catch (err) {
 			const errData = (err as { data?: unknown }).data;
-			log.logWarning(`[slack] postMessage FAILED (${truncated.length} chars)`, errData ? JSON.stringify(errData).substring(0, 500) : String(err));
+			log.logWarning(
+				`[slack] postMessage FAILED (${truncated.length} chars)`,
+				errData ? JSON.stringify(errData).substring(0, 500) : String(err),
+			);
 			throw err;
 		}
 	}
@@ -230,7 +239,10 @@ export class SlackBot {
 			await this.webClient.chat.update({ channel, ts, text: truncated });
 		} catch (err) {
 			const errData = (err as { data?: unknown }).data;
-			log.logWarning(`[slack] updateMessage FAILED (${truncated.length} chars)`, errData ? JSON.stringify(errData).substring(0, 500) : String(err));
+			log.logWarning(
+				`[slack] updateMessage FAILED (${truncated.length} chars)`,
+				errData ? JSON.stringify(errData).substring(0, 500) : String(err),
+			);
 			throw err;
 		}
 	}
@@ -247,7 +259,10 @@ export class SlackBot {
 			return result.ts as string;
 		} catch (err) {
 			const errData = (err as { data?: unknown }).data;
-			log.logWarning(`[slack] postInThread FAILED (${truncated.length} chars)`, errData ? JSON.stringify(errData).substring(0, 500) : String(err));
+			log.logWarning(
+				`[slack] postInThread FAILED (${truncated.length} chars)`,
+				errData ? JSON.stringify(errData).substring(0, 500) : String(err),
+			);
 			throw err;
 		}
 	}
@@ -255,13 +270,17 @@ export class SlackBot {
 	async addReaction(channel: string, ts: string, emoji: string): Promise<void> {
 		try {
 			await this.webClient.reactions.add({ channel, timestamp: ts, name: emoji });
-		} catch { /* ignore - reaction may already exist */ }
+		} catch {
+			/* ignore - reaction may already exist */
+		}
 	}
 
 	async removeReaction(channel: string, ts: string, emoji: string): Promise<void> {
 		try {
 			await this.webClient.reactions.remove({ channel, timestamp: ts, name: emoji });
-		} catch { /* ignore - reaction may not exist */ }
+		} catch {
+			/* ignore - reaction may not exist */
+		}
 	}
 
 	async uploadFile(channel: string, filePath: string, title?: string, threadTs?: string): Promise<void> {
@@ -283,7 +302,12 @@ export class SlackBot {
 	 * Use Haiku to determine if a message is directed at the bot in an ongoing conversation.
 	 * Looks at recent conversation context to decide.
 	 */
-	private async isMessageDirectedAtBot(messageText: string, userName: string, channel: string, threadTs?: string): Promise<boolean> {
+	private async isMessageDirectedAtBot(
+		messageText: string,
+		userName: string,
+		channel: string,
+		threadTs?: string,
+	): Promise<boolean> {
 		// Get recent conversation context from log.jsonl, filtered by thread
 		let context = "";
 		try {
@@ -304,15 +328,17 @@ export class SlackBot {
 							if (entryThread) continue;
 						}
 
-						const who = entry.isBot ? "Mom(bot)" : (entry.userName || entry.user || "unknown");
+						const who = entry.isBot ? "Mom(bot)" : entry.userName || entry.user || "unknown";
 						const text = (entry.text || "").substring(0, 200);
 						msgs.push(`${who}: ${text}`);
-					} catch { continue; }
+					} catch {}
 				}
 				// Take last 10 relevant messages
 				context = msgs.slice(-10).join("\n");
 			}
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 
 		return isMessageForBot(messageText, userName, context, this.getApiKey);
 	}
@@ -353,7 +379,7 @@ export class SlackBot {
 							relevantEntries.push(entry);
 						}
 					}
-				} catch { continue; }
+				} catch {}
 			}
 
 			let messagesSinceBot = 0;
@@ -607,9 +633,7 @@ export class SlackBot {
 							`[${e.channel}] Implicit conversation with ${userName} (${msgGap} msgs since last reply, Haiku: directed)`,
 						);
 					} else {
-						log.logInfo(
-							`[${e.channel}] Skipping implicit - Haiku says not directed (${msgGap} msgs gap)`,
-						);
+						log.logInfo(`[${e.channel}] Skipping implicit - Haiku says not directed (${msgGap} msgs gap)`);
 					}
 				}
 			}
@@ -843,7 +867,12 @@ export class SlackBot {
 	 * Finds the original requester from the thread, verifies the reactor is that person,
 	 * then uses a lightweight LLM to classify the emoji intent.
 	 */
-	private async handleReaction(reactorUserId: string, emoji: string, channel: string, messageTs: string): Promise<void> {
+	private async handleReaction(
+		reactorUserId: string,
+		emoji: string,
+		channel: string,
+		messageTs: string,
+	): Promise<void> {
 		// Find the requester: the last non-bot user who spoke BEFORE the reacted message.
 		// Strategy:
 		// 1. Try thread context (conversations.replies with thread parent) - for in-thread conversations
@@ -876,10 +905,12 @@ export class SlackBot {
 							threadParentTs = entry.thread_ts;
 							break;
 						}
-					} catch { continue; }
+					} catch {}
 				}
 			}
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 
 		try {
 			// 1. Try thread replies first (use thread parent ts, not the message ts itself)
@@ -889,7 +920,9 @@ export class SlackBot {
 				ts: threadTs,
 				limit: 100,
 			});
-			const threadMessages = threadResult.messages as Array<{ user?: string; bot_id?: string; ts: string }> | undefined;
+			const threadMessages = threadResult.messages as
+				| Array<{ user?: string; bot_id?: string; ts: string }>
+				| undefined;
 			if (threadMessages) {
 				requesterId = findRequester(threadMessages);
 			}
@@ -906,7 +939,9 @@ export class SlackBot {
 					limit: 10,
 					inclusive: false,
 				});
-				const historyMessages = historyResult.messages as Array<{ user?: string; bot_id?: string; ts: string }> | undefined;
+				const historyMessages = historyResult.messages as
+					| Array<{ user?: string; bot_id?: string; ts: string }>
+					| undefined;
 				if (historyMessages) {
 					// history returns newest first, so first non-bot message is the closest one before messageTs
 					for (const msg of historyMessages) {
@@ -966,11 +1001,7 @@ export class SlackBot {
  * Call Claude Haiku for lightweight classification tasks.
  * Returns the response text, or fallback on error.
  */
-async function callHaiku(
-	prompt: string,
-	fallback: string,
-	getApiKey?: () => Promise<string>,
-): Promise<string> {
+async function callHaiku(prompt: string, fallback: string, getApiKey?: () => Promise<string>): Promise<string> {
 	let apiKey = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
 	if (!apiKey && getApiKey) {
 		try {

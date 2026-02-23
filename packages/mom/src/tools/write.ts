@@ -9,7 +9,10 @@ const writeSchema = Type.Object({
 	content: Type.String({ description: "Content to write to the file" }),
 });
 
-export function createWriteTool(executor: Executor, getUserId: () => string | undefined): AgentTool<typeof writeSchema> {
+export function createWriteTool(
+	executor: Executor,
+	getUserId: () => string | undefined,
+): AgentTool<typeof writeSchema> {
 	return {
 		name: "write",
 		label: "write",

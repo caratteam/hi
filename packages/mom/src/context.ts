@@ -136,7 +136,10 @@ export function syncLogToSessionManager(
 	if (wasTruncated) {
 		const omitted = totalThreadMessages - MAX_SYNC_MESSAGES;
 		const noticeText = `[... ${omitted}개의 이전 메시지 생략. 이전 대화는 log.jsonl을 검색하세요 ...]`;
-		const noticeTime = recentMessages.length > 0 ? (new Date(recentMessages[0].logMsg.date!).getTime() || Date.now()) - 1 : Date.now();
+		const noticeTime =
+			recentMessages.length > 0
+				? (new Date(recentMessages[0].logMsg.date!).getTime() || Date.now()) - 1
+				: Date.now();
 		if (!existingMessages.has(noticeText)) {
 			newMessages.push({
 				timestamp: noticeTime,

@@ -155,120 +155,134 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 
 		respond: async (text: string, shouldLog = true) => {
 			let lastError: unknown;
-			updatePromise = updatePromise.then(async () => {
-				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				accumulatedText = trimFront(accumulatedText);
-				let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+			updatePromise = updatePromise
+				.then(async () => {
+					accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+					accumulatedText = trimFront(accumulatedText);
+					let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
-				const tryUpdate = async (txt: string) => {
-					if (messageTs) {
-						await slack.updateMessage(event.channel, messageTs, txt);
-					} else if (event.thread_ts) {
-						messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
-					} else {
-						messageTs = await slack.postMessage(event.channel, txt);
-					}
-				};
+					const tryUpdate = async (txt: string) => {
+						if (messageTs) {
+							await slack.updateMessage(event.channel, messageTs, txt);
+						} else if (event.thread_ts) {
+							messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
+						} else {
+							messageTs = await slack.postMessage(event.channel, txt);
+						}
+					};
 
-				try {
-					await tryUpdate(displayText);
-				} catch (err) {
-					const errMsg = err instanceof Error ? err.message : String(err);
-					const errData = (err as { data?: unknown }).data;
-					const isTooLong = errMsg.includes("msg_too_long") ||
-						(errData && JSON.stringify(errData).includes("msg_too_long"));
-					if (isTooLong) {
-						// Halve the accumulated text and retry
-						accumulatedText = trimFront(accumulatedText.slice(Math.floor(accumulatedText.length / 2)));
-						displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-						log.logWarning(`respond msg_too_long, retrying with ${displayText.length} chars`);
+					try {
 						await tryUpdate(displayText);
-					} else {
-						throw err;
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						const errData = (err as { data?: unknown }).data;
+						const isTooLong =
+							errMsg.includes("msg_too_long") || (errData && JSON.stringify(errData).includes("msg_too_long"));
+						if (isTooLong) {
+							// Halve the accumulated text and retry
+							accumulatedText = trimFront(accumulatedText.slice(Math.floor(accumulatedText.length / 2)));
+							displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+							log.logWarning(`respond msg_too_long, retrying with ${displayText.length} chars`);
+							await tryUpdate(displayText);
+						} else {
+							throw err;
+						}
 					}
-				}
 
-				if (shouldLog && messageTs) {
-					slack.logBotResponse(event.channel, text, messageTs, event.thread_ts);
-				}
-			}).catch((err) => { lastError = err; });
+					if (shouldLog && messageTs) {
+						slack.logBotResponse(event.channel, text, messageTs, event.thread_ts);
+					}
+				})
+				.catch((err) => {
+					lastError = err;
+				});
 			await updatePromise;
 			if (lastError) throw lastError;
 		},
 
 		replaceMessage: async (text: string) => {
 			let lastError: unknown;
-			updatePromise = updatePromise.then(async () => {
-				accumulatedText = trimFront(text);
-				let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+			updatePromise = updatePromise
+				.then(async () => {
+					accumulatedText = trimFront(text);
+					let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
-				const tryUpdate = async (txt: string) => {
-					if (messageTs) {
-						await slack.updateMessage(event.channel, messageTs, txt);
-					} else if (event.thread_ts) {
-						messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
-					} else {
-						messageTs = await slack.postMessage(event.channel, txt);
-					}
-				};
+					const tryUpdate = async (txt: string) => {
+						if (messageTs) {
+							await slack.updateMessage(event.channel, messageTs, txt);
+						} else if (event.thread_ts) {
+							messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
+						} else {
+							messageTs = await slack.postMessage(event.channel, txt);
+						}
+					};
 
-				try {
-					await tryUpdate(displayText);
-				} catch (err) {
-					const errMsg = err instanceof Error ? err.message : String(err);
-					const errData = (err as { data?: unknown }).data;
-					const isTooLong = errMsg.includes("msg_too_long") ||
-						(errData && JSON.stringify(errData).includes("msg_too_long"));
-					if (isTooLong) {
-						// Retry with progressively shorter text
-						for (const limit of [30000, 20000, 10000, 4000]) {
-							try {
-								displayText = trimFront(text.length > limit ? text.slice(text.length - limit) : text);
-								log.logWarning(`replaceMessage msg_too_long, retrying with ${limit} chars`);
-								await tryUpdate(displayText);
-								return;
-							} catch {
-								continue;
+					try {
+						await tryUpdate(displayText);
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						const errData = (err as { data?: unknown }).data;
+						const isTooLong =
+							errMsg.includes("msg_too_long") || (errData && JSON.stringify(errData).includes("msg_too_long"));
+						if (isTooLong) {
+							// Retry with progressively shorter text
+							for (const limit of [30000, 20000, 10000, 4000]) {
+								try {
+									displayText = trimFront(text.length > limit ? text.slice(text.length - limit) : text);
+									log.logWarning(`replaceMessage msg_too_long, retrying with ${limit} chars`);
+									await tryUpdate(displayText);
+									return;
+								} catch {}
 							}
 						}
+						throw err;
 					}
-					throw err;
-				}
-			}).catch((err) => { lastError = err; });
+				})
+				.catch((err) => {
+					lastError = err;
+				});
 			await updatePromise;
 			if (lastError) throw lastError;
 		},
 
 		respondInThread: async (text: string, force?: boolean) => {
 			let lastError: unknown;
-			updatePromise = updatePromise.then(async () => {
-				if (messageTs) {
-					// When already in a thread, skip sub-thread messages unless forced
-					if (event.thread_ts && !force) {
-						return;
+			updatePromise = updatePromise
+				.then(async () => {
+					if (messageTs) {
+						// When already in a thread, skip sub-thread messages unless forced
+						if (event.thread_ts && !force) {
+							return;
+						}
+						const threadTs = event.thread_ts || messageTs;
+						const ts = await slack.postInThread(event.channel, threadTs, text);
+						threadMessageTs.push(ts);
 					}
-					const threadTs = event.thread_ts || messageTs;
-					const ts = await slack.postInThread(event.channel, threadTs, text);
-					threadMessageTs.push(ts);
-				}
-			}).catch((err) => { lastError = err; });
+				})
+				.catch((err) => {
+					lastError = err;
+				});
 			await updatePromise;
 			if (lastError) throw lastError;
 		},
 
 		setTyping: async (isTyping: boolean) => {
 			if (isTyping && !messageTs) {
-				updatePromise = updatePromise.then(async () => {
-					if (!messageTs) {
-						accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
-						const displayText = accumulatedText + workingIndicator;
-						if (event.thread_ts) {
-							messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
-						} else {
-							messageTs = await slack.postMessage(event.channel, displayText);
+				updatePromise = updatePromise
+					.then(async () => {
+						if (!messageTs) {
+							accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
+							const displayText = accumulatedText + workingIndicator;
+							if (event.thread_ts) {
+								messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
+							} else {
+								messageTs = await slack.postMessage(event.channel, displayText);
+							}
 						}
-					}
-				}).catch((err) => { log.logWarning("setTyping error", String(err)); });
+					})
+					.catch((err) => {
+						log.logWarning("setTyping error", String(err));
+					});
 				await updatePromise;
 			}
 		},
@@ -280,34 +294,42 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		},
 
 		setWorking: async (working: boolean) => {
-			updatePromise = updatePromise.then(async () => {
-				isWorking = working;
-				if (messageTs) {
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-					await slack.updateMessage(event.channel, messageTs, displayText);
-				}
-			}).catch((err) => { log.logWarning("setWorking error", String(err)); });
+			updatePromise = updatePromise
+				.then(async () => {
+					isWorking = working;
+					if (messageTs) {
+						const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+						await slack.updateMessage(event.channel, messageTs, displayText);
+					}
+				})
+				.catch((err) => {
+					log.logWarning("setWorking error", String(err));
+				});
 			await updatePromise;
 		},
 
 		deleteMessage: async () => {
 			let lastError: unknown;
-			updatePromise = updatePromise.then(async () => {
-				// Delete thread messages first (in reverse order)
-				for (let i = threadMessageTs.length - 1; i >= 0; i--) {
-					try {
-						await slack.deleteMessage(event.channel, threadMessageTs[i]);
-					} catch {
-						// Ignore errors deleting thread messages
+			updatePromise = updatePromise
+				.then(async () => {
+					// Delete thread messages first (in reverse order)
+					for (let i = threadMessageTs.length - 1; i >= 0; i--) {
+						try {
+							await slack.deleteMessage(event.channel, threadMessageTs[i]);
+						} catch {
+							// Ignore errors deleting thread messages
+						}
 					}
-				}
-				threadMessageTs.length = 0;
-				// Then delete main message
-				if (messageTs) {
-					await slack.deleteMessage(event.channel, messageTs);
-					messageTs = null;
-				}
-			}).catch((err) => { lastError = err; });
+					threadMessageTs.length = 0;
+					// Then delete main message
+					if (messageTs) {
+						await slack.deleteMessage(event.channel, messageTs);
+						messageTs = null;
+					}
+				})
+				.catch((err) => {
+					lastError = err;
+				});
 			await updatePromise;
 			if (lastError) throw lastError;
 		},

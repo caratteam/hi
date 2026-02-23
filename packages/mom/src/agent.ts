@@ -21,7 +21,7 @@ import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
 import type { ChannelStore } from "./store.js";
-import { createMomTools, setUploadFunction } from "./tools/index.js";
+import { createMomTools } from "./tools/index.js";
 
 // Hardcoded model for now - TODO: make configurable (issue #63)
 const model = getModel("anthropic", "claude-opus-4-6");
@@ -507,8 +507,18 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	// User ID will be set during run()
 	let currentUserId: string | undefined;
 
-	// Create tools with access to current user ID
-	const tools = createMomTools(executor, () => currentUserId);
+	// Per-channel upload function, updated each run() with the current ctx
+	let currentUploadFn: ((filePath: string, title?: string) => Promise<void>) | null = null;
+
+	// Create tools with access to current user ID and upload function
+	const tools = createMomTools(
+		executor,
+		() => currentUserId,
+		async (filePath: string, title?: string) => {
+			if (!currentUploadFn) throw new Error("Upload function not configured for this run");
+			await currentUploadFn(filePath, title);
+		},
+	);
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
@@ -802,7 +812,10 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 						if (block.data && typeof block.data === "string" && block.data.length > 1000) {
 							const label = block.type || "binary";
 							const mime = block.mimeType || "";
-							content.splice(i, 1, { type: "text", text: `[${label}${mime ? `: ${mime}` : ""} — removed from context]` });
+							content.splice(i, 1, {
+								type: "text",
+								text: `[${label}${mime ? `: ${mime}` : ""} — removed from context]`,
+							});
 							strippedCount++;
 						}
 					}
@@ -813,11 +826,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 				// Limit to most recent MAX_CONTEXT_MESSAGES messages
 				const messages = reloadedSession.messages;
-				const trimmedMessages = messages.length > MAX_CONTEXT_MESSAGES
-					? messages.slice(messages.length - MAX_CONTEXT_MESSAGES)
-					: messages;
+				const trimmedMessages =
+					messages.length > MAX_CONTEXT_MESSAGES
+						? messages.slice(messages.length - MAX_CONTEXT_MESSAGES)
+						: messages;
 				if (messages.length > MAX_CONTEXT_MESSAGES) {
-					log.logInfo(`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`);
+					log.logInfo(
+						`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`,
+					);
 				}
 
 				agent.replaceMessages(trimmedMessages);
@@ -841,11 +857,11 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			);
 			session.agent.setSystemPrompt(systemPrompt);
 
-			// Set up file upload function
-			setUploadFunction(async (filePath: string, title?: string) => {
+			// Set up file upload function for this run's context
+			currentUploadFn = async (filePath: string, title?: string) => {
 				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId);
 				await ctx.uploadFile(hostPath, title);
-			});
+			};
 
 			// Reset per-run state
 			runState.ctx = ctx;
@@ -877,7 +893,10 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 							const errData = (err as { data?: unknown }).data;
 							log.logWarning(`Slack API error (${errorContext})`, errMsg);
 							if (errData) {
-								log.logWarning(`Slack API error details (${errorContext})`, JSON.stringify(errData).substring(0, 500));
+								log.logWarning(
+									`Slack API error details (${errorContext})`,
+									JSON.stringify(errData).substring(0, 500),
+								);
 							}
 							// Don't try to respondInThread for msg_too_long - it will likely fail too
 							if (!errMsg.includes("msg_too_long")) {
@@ -1041,7 +1060,13 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					: 0;
 				const contextWindow = model.contextWindow || 200000;
 
-				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow, model.id);
+				const summary = log.logUsageSummary(
+					runState.logCtx!,
+					runState.totalUsage,
+					contextTokens,
+					contextWindow,
+					model.id,
+				);
 				runState.queue.enqueue(() => ctx.respondInThread(summary, true), "usage summary");
 				await queueChain;
 			}

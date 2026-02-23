@@ -386,7 +386,15 @@ const handler: MomHandler = {
 				}
 			}
 		} catch (err) {
-			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
+			const errMsg = err instanceof Error ? err.message : String(err);
+			const errStack = err instanceof Error ? err.stack : undefined;
+			log.logWarning(`[${event.channel}] Run error: ${errMsg}`);
+			if (errStack) log.logWarning(`[${event.channel}] Stack: ${errStack}`);
+			try {
+				await slack.postInThread(event.channel, event.ts, `_Sorry, something went wrong: ${errMsg}_`);
+			} catch {
+				// Last resort - at least it's in the logs
+			}
 		} finally {
 			state.running = false;
 		}

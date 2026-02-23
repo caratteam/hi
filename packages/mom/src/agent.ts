@@ -1002,10 +1002,12 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			await queueChain;
 
 			// Handle error case - update main message and post error to thread
-			if (runState.stopReason === "error" && runState.errorMessage) {
+			if (runState.stopReason === "error") {
+				const errorDetail = runState.errorMessage || "unknown error";
+				log.logWarning(`[${channelId}] Agent stopped with error: ${errorDetail}`);
 				try {
-					await ctx.replaceMessage("_Sorry, something went wrong_");
-					await ctx.respondInThread(`_Error: ${runState.errorMessage}_`);
+					await ctx.replaceMessage(`_Sorry, something went wrong: ${errorDetail}_`);
+					await ctx.respondInThread(`_Error: ${errorDetail}_`);
 				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
 					log.logWarning("Failed to post error message", errMsg);

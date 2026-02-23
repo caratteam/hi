@@ -2,6 +2,7 @@ import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
+	type AgentSessionEvent,
 	AuthStorage,
 	convertToLlm,
 	createExtensionRuntime,
@@ -431,66 +432,61 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 const MAX_CONTEXT_MESSAGES = 20;
 
 /**
- * Sanitize tool_use/tool_result pairs in a message array.
+ * Sanitize toolCall/toolResult pairs in a message array.
  *
- * Claude API requires every tool_result block to have a corresponding tool_use block
- * in the immediately preceding assistant message. After trimming context to recent N messages,
- * orphan tool_results (whose tool_use was trimmed) cause 400 errors.
+ * Claude API requires every tool_result to have a corresponding tool_use (toolCall) block
+ * in a preceding assistant message. After trimming context to recent N messages,
+ * orphan toolResults (whose toolCall was trimmed) cause 400 errors.
+ *
+ * Internal message format (from buildSessionContext):
+ * - Assistant messages: role="assistant", content array with type="toolCall", id="toolu_..."
+ * - Tool results: role="toolResult" (separate message), toolCallId="toolu_..."
  *
  * This function:
- * 1. Collects all tool_use IDs from assistant messages
- * 2. Removes tool_result blocks whose tool_use_id is not in the collected set
- * 3. Removes empty user messages that had only orphan tool_results
- * 4. Also removes assistant messages with tool_use blocks that have no matching tool_result after them
+ * 1. Collects all toolCall IDs from assistant messages
+ * 2. Removes toolResult messages whose toolCallId has no matching toolCall
+ * 3. Collects all toolResult toolCallIds
+ * 4. Removes toolCall blocks from assistant messages that have no matching toolResult
+ * 5. Drops empty assistant messages after filtering
  */
 function sanitizeToolPairs(messages: any[], log: any, channelId: string, threadTs: string): any[] {
-	// Collect all tool_use IDs from assistant messages
-	const toolUseIds = new Set<string>();
+	// Pass 1: Collect all toolCall IDs from assistant messages
+	const toolCallIds = new Set<string>();
 	for (const msg of messages) {
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
-				if (block.type === "tool_use" && block.id) {
-					toolUseIds.add(block.id);
+				if (block.type === "toolCall" && block.id) {
+					toolCallIds.add(block.id);
 				}
 			}
 		}
 	}
 
-	// Collect all tool_result IDs from user messages
+	// Pass 2: Collect all toolResult IDs (these are separate messages with role="toolResult")
 	const toolResultIds = new Set<string>();
 	for (const msg of messages) {
-		if (msg.role === "user" && Array.isArray(msg.content)) {
-			for (const block of msg.content) {
-				if (block.type === "tool_result" && block.tool_use_id) {
-					toolResultIds.add(block.tool_use_id);
-				}
-			}
+		if (msg.role === "toolResult" && msg.toolCallId) {
+			toolResultIds.add(msg.toolCallId);
 		}
 	}
 
 	let removedResults = 0;
-	let removedUses = 0;
+	let removedCalls = 0;
 	const result: any[] = [];
 
 	for (const msg of messages) {
-		if (msg.role === "user" && Array.isArray(msg.content)) {
-			// Remove orphan tool_result blocks (no matching tool_use)
-			const filtered = msg.content.filter((block: any) => {
-				if (block.type === "tool_result" && block.tool_use_id && !toolUseIds.has(block.tool_use_id)) {
-					removedResults++;
-					return false;
-				}
-				return true;
-			});
-			if (filtered.length > 0) {
-				result.push({ ...msg, content: filtered });
+		if (msg.role === "toolResult") {
+			// Drop orphan toolResult messages (no matching toolCall in any assistant message)
+			if (msg.toolCallId && !toolCallIds.has(msg.toolCallId)) {
+				removedResults++;
+				continue;
 			}
-			// If all content was orphan tool_results, drop the entire message
+			result.push(msg);
 		} else if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			// Remove tool_use blocks that have no matching tool_result
+			// Remove toolCall blocks that have no matching toolResult
 			const filtered = msg.content.filter((block: any) => {
-				if (block.type === "tool_use" && block.id && !toolResultIds.has(block.id)) {
-					removedUses++;
+				if (block.type === "toolCall" && block.id && !toolResultIds.has(block.id)) {
+					removedCalls++;
 					return false;
 				}
 				return true;
@@ -498,14 +494,15 @@ function sanitizeToolPairs(messages: any[], log: any, channelId: string, threadT
 			if (filtered.length > 0) {
 				result.push({ ...msg, content: filtered });
 			}
+			// Drop empty assistant messages (all toolCalls were orphaned)
 		} else {
 			result.push(msg);
 		}
 	}
 
-	if (removedResults > 0 || removedUses > 0) {
+	if (removedResults > 0 || removedCalls > 0) {
 		log.logInfo(
-			`[${channelId}:${threadTs}] Sanitized tool pairs: removed ${removedResults} orphan tool_result(s), ${removedUses} orphan tool_use(s)`,
+			`[${channelId}:${threadTs}] Sanitized tool pairs: removed ${removedResults} orphan toolResult(s), ${removedCalls} orphan toolCall(s)`,
 		);
 	}
 
@@ -664,7 +661,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		});
 
 		// Subscribe to events for this session (same handler for all threads)
-		session.subscribe(async (event: AgentEvent) => {
+		session.subscribe(async (event: AgentSessionEvent) => {
 			if (!runState.ctx || !runState.logCtx || !runState.queue) return;
 			handleSessionEvent(event, runState);
 		});
@@ -712,7 +709,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	};
 
 	/** Handle session events (shared across all thread sessions) */
-	function handleSessionEvent(event: AgentEvent, state: typeof runState): void {
+	function handleSessionEvent(event: AgentSessionEvent, state: typeof runState): void {
 		if (!state.ctx || !state.logCtx || !state.queue) return;
 
 		const { ctx, logCtx, queue, pendingTools } = state;
@@ -1102,11 +1099,11 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			} else {
 				// Final message update
 				const messages = session.messages;
-				const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
+				const lastAssistant = messages.filter((m: any) => m.role === "assistant").pop() as any;
 				const finalText =
 					lastAssistant?.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
+						.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
+						.map((c: { type: "text"; text: string }) => c.text)
 						.join("\n") || "";
 
 				// Check for [SILENT] marker - delete message and thread instead of posting
@@ -1139,7 +1136,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				const lastAssistantMessage = messages
 					.slice()
 					.reverse()
-					.find((m) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
+					.find((m: any) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
 
 				const contextTokens = lastAssistantMessage
 					? lastAssistantMessage.usage.input +

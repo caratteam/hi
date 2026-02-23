@@ -145,6 +145,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			userName: user?.userName,
 			channel: event.channel,
 			ts: event.ts,
+			thread_ts: event.thread_ts,
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
 		},
 		channelName: slack.getChannel(event.channel)?.name,

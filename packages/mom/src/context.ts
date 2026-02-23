@@ -1,12 +1,12 @@
 /**
  * Context management for mom.
  *
- * Mom uses two files per channel:
- * - context.jsonl: Structured API messages for LLM context (same format as coding-agent sessions)
+ * Mom uses per-thread context files:
+ * - context-{thread_ts}.jsonl: Structured API messages for LLM context, scoped to a single thread
  * - log.jsonl: Human-readable channel history for grep (no tool results)
  *
  * This module provides:
- * - syncLogToSessionManager: Syncs messages from log.jsonl to SessionManager
+ * - syncLogToSessionManager: Syncs messages from log.jsonl to SessionManager (thread-filtered, limited)
  * - MomSettingsManager: Simple settings for mom (compaction, retry, model preferences)
  */
 
@@ -19,9 +19,13 @@ import { dirname, join } from "path";
 // Sync log.jsonl to SessionManager
 // ============================================================================
 
+/** Maximum number of recent messages to sync from log.jsonl into context */
+const MAX_SYNC_MESSAGES = 20;
+
 interface LogMessage {
 	date?: string;
 	ts?: string;
+	thread_ts?: string;
 	user?: string;
 	userName?: string;
 	text?: string;
@@ -31,17 +35,19 @@ interface LogMessage {
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
- * This ensures that messages logged while mom wasn't running (channel chatter,
- * backfilled messages, messages while busy) are added to the LLM context.
+ * Only syncs messages belonging to the specified thread (or top-level if no threadTs).
+ * Limits to the most recent MAX_SYNC_MESSAGES to keep context small.
  *
  * @param sessionManager - The SessionManager to sync to
  * @param channelDir - Path to channel directory containing log.jsonl
+ * @param threadTs - Thread timestamp to filter by (undefined = top-level messages only)
  * @param excludeSlackTs - Slack timestamp of current message (will be added via prompt(), not sync)
  * @returns Number of messages synced
  */
 export function syncLogToSessionManager(
 	sessionManager: SessionManager,
 	channelDir: string,
+	threadTs?: string,
 	excludeSlackTs?: string,
 ): number {
 	const logFile = join(channelDir, "log.jsonl");
@@ -89,11 +95,12 @@ export function syncLogToSessionManager(
 		}
 	}
 
-	// Read log.jsonl and find user messages not in context
+	// Read log.jsonl and filter to matching thread, then take recent messages
 	const logContent = readFileSync(logFile, "utf-8");
 	const logLines = logContent.trim().split("\n").filter(Boolean);
 
-	const newMessages: Array<{ timestamp: number; message: UserMessage }> = [];
+	// First pass: collect all matching thread messages
+	const threadMessages: Array<{ line: string; logMsg: LogMessage }> = [];
 
 	for (const line of logLines) {
 		try {
@@ -103,30 +110,51 @@ export function syncLogToSessionManager(
 			const date = logMsg.date;
 			if (!slackTs || !date) continue;
 
-			// Skip the current message being processed (will be added via prompt())
-			if (excludeSlackTs && slackTs === excludeSlackTs) continue;
+			// Filter by thread:
+			// - If threadTs is set, include messages whose thread_ts matches OR whose ts equals threadTs (parent)
+			// - If threadTs is not set, only include top-level messages (no thread_ts)
+			if (threadTs) {
+				if (logMsg.thread_ts !== threadTs && logMsg.ts !== threadTs) continue;
+			} else {
+				if (logMsg.thread_ts) continue;
+			}
 
-			// Skip bot messages - added through agent flow
-			if (logMsg.isBot) continue;
-
-			// Build the message text as it would appear in context
-			const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
-
-			// Skip if this exact message text is already in context
-			if (existingMessages.has(messageText)) continue;
-
-			const msgTime = new Date(date).getTime() || Date.now();
-			const userMessage: UserMessage = {
-				role: "user",
-				content: [{ type: "text", text: messageText }],
-				timestamp: msgTime,
-			};
-
-			newMessages.push({ timestamp: msgTime, message: userMessage });
-			existingMessages.add(messageText); // Track to avoid duplicates within this sync
+			threadMessages.push({ line, logMsg });
 		} catch {
 			// Skip malformed lines
 		}
+	}
+
+	// Take only the most recent MAX_SYNC_MESSAGES
+	const recentMessages = threadMessages.slice(-MAX_SYNC_MESSAGES);
+
+	const newMessages: Array<{ timestamp: number; message: UserMessage }> = [];
+
+	for (const { logMsg } of recentMessages) {
+		const slackTs = logMsg.ts!;
+		const date = logMsg.date!;
+
+		// Skip the current message being processed (will be added via prompt())
+		if (excludeSlackTs && slackTs === excludeSlackTs) continue;
+
+		// Skip bot messages - added through agent flow
+		if (logMsg.isBot) continue;
+
+		// Build the message text as it would appear in context
+		const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
+
+		// Skip if this exact message text is already in context
+		if (existingMessages.has(messageText)) continue;
+
+		const msgTime = new Date(date).getTime() || Date.now();
+		const userMessage: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text: messageText }],
+			timestamp: msgTime,
+		};
+
+		newMessages.push({ timestamp: msgTime, message: userMessage });
+		existingMessages.add(messageText); // Track to avoid duplicates within this sync
 	}
 
 	if (newMessages.length === 0) return 0;

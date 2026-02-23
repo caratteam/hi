@@ -68,6 +68,7 @@ export interface SlackContext {
 		userName?: string;
 		channel: string;
 		ts: string;
+		thread_ts?: string;
 		attachments: Array<{ local: string }>;
 	};
 	channelName?: string;

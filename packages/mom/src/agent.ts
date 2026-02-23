@@ -427,6 +427,54 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 	anthropic: "ANTHROPIC_API_KEY",
 };
 
+/** Maximum number of messages to keep from context file when loading */
+const MAX_CONTEXT_MESSAGES = 20;
+
+/**
+ * Apply monkey-patch to SessionManager._persist to strip large binary data.
+ * Without this, reading images/videos via the "read" tool writes megabytes of base64
+ * into context files, which can blow up the context on reload.
+ */
+function patchSessionManagerPersist(sessionManager: SessionManager): void {
+	const originalPersist = (sessionManager as any)._persist.bind(sessionManager);
+	(sessionManager as any)._persist = (entry: any) => {
+		if (entry?.type === "message") {
+			const content = entry.message?.content;
+			if (Array.isArray(content)) {
+				let modified = false;
+				const stripped = content.map((c: any) => {
+					if (c?.data && typeof c.data === "string" && c.data.length > 1000) {
+						modified = true;
+						const sizeKB = Math.round(c.data.length / 1024);
+						const label = c.type || "binary";
+						const mime = c.mimeType || "";
+						return { type: "text", text: `[${label}${mime ? `: ${mime}` : ""}, ${sizeKB}KB base64 stripped]` };
+					}
+					return c;
+				});
+				if (modified) {
+					const strippedEntry = { ...entry, message: { ...entry.message, content: stripped } };
+					return originalPersist(strippedEntry);
+				}
+			}
+		}
+		return originalPersist(entry);
+	};
+}
+
+/**
+ * Get the context file path for a given thread.
+ * Each thread gets its own context file to avoid cross-contamination.
+ */
+function getContextFilePath(channelDir: string, threadTs?: string): string {
+	if (threadTs) {
+		return join(channelDir, `context-${threadTs}.jsonl`);
+	}
+	// This shouldn't happen in practice since top-level mentions get a thread_ts
+	// from the response message, but we handle it as a fallback
+	return join(channelDir, "context-main.jsonl");
+}
+
 function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
 	// Load API keys from AuthStorage to inject into sandbox environment
 	const authPath = join(homedir(), ".pi", "mom", "auth.json");
@@ -439,7 +487,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				if (cred?.type === "api_key" && cred.key) {
 					sandboxEnv[envVar] = cred.key;
 				} else if (cred?.type === "oauth" && cred.access) {
-					// OAuth tokens: inject access token + refresh token + expiry
 					sandboxEnv[envVar] = cred.access;
 					if (cred.refresh) {
 						sandboxEnv[`${envVar}_REFRESH`] = cred.refresh;
@@ -468,44 +515,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const skills = loadMomSkills(channelDir, workspacePath);
 	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
 
-	// Create session manager and settings manager
-	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
-	const contextFile = join(channelDir, "context.jsonl");
-	const sessionManager = SessionManager.open(contextFile, channelDir);
-
-	// Monkey-patch _persist to strip large binary data before writing to disk.
-	// Without this, reading images/videos via the "read" tool writes megabytes of base64
-	// into context.jsonl, which can blow up the context on reload.
-	const originalPersist = (sessionManager as any)._persist.bind(sessionManager);
-	(sessionManager as any)._persist = (entry: any) => {
-		if (entry?.type === "message") {
-			const content = entry.message?.content;
-			if (Array.isArray(content)) {
-				let modified = false;
-				const stripped = content.map((c: any) => {
-					// Strip any content block that has a large base64 data field (images, video, etc.)
-					if (c?.data && typeof c.data === "string" && c.data.length > 1000) {
-						modified = true;
-						const sizeKB = Math.round(c.data.length / 1024);
-						const label = c.type || "binary";
-						const mime = c.mimeType || "";
-						return { type: "text", text: `[${label}${mime ? `: ${mime}` : ""}, ${sizeKB}KB base64 stripped]` };
-					}
-					return c;
-				});
-				if (modified) {
-					const strippedEntry = { ...entry, message: { ...entry.message, content: stripped } };
-					return originalPersist(strippedEntry);
-				}
-			}
-		}
-		return originalPersist(entry);
-	};
-
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
 	// Create AuthStorage and ModelRegistry
-	// Auth stored outside workspace so agent can't access it
 	const authStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
 	sharedAuthStorage = authStorage;
 	const modelRegistry = new ModelRegistry(authStorage);
@@ -522,13 +534,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		getApiKey: async () => getAnthropicApiKey(authStorage),
 	});
 
-	// Load existing messages
-	const loadedSession = sessionManager.buildSessionContext();
-	if (loadedSession.messages.length > 0) {
-		agent.replaceMessages(loadedSession.messages);
-		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
-	}
-
 	const resourceLoader: ResourceLoader = {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
@@ -544,16 +549,39 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
-	// Create AgentSession wrapper
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settingsManager: settingsManager as any,
-		cwd: process.cwd(),
-		modelRegistry,
-		resourceLoader,
-		baseToolsOverride,
-	});
+	// Per-thread session cache: threadTs -> { sessionManager, session }
+	const threadSessions = new Map<string, { sessionManager: SessionManager; session: AgentSession }>();
+
+	/** Get or create a session for a specific thread */
+	function getThreadSession(threadTs: string): { sessionManager: SessionManager; session: AgentSession } {
+		const existing = threadSessions.get(threadTs);
+		if (existing) return existing;
+
+		const contextFile = getContextFilePath(channelDir, threadTs);
+		const sessionManager = SessionManager.open(contextFile, channelDir);
+		patchSessionManagerPersist(sessionManager);
+
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager: settingsManager as any,
+			cwd: process.cwd(),
+			modelRegistry,
+			resourceLoader,
+			baseToolsOverride,
+		});
+
+		// Subscribe to events for this session (same handler for all threads)
+		session.subscribe(async (event: AgentEvent) => {
+			if (!runState.ctx || !runState.logCtx || !runState.queue) return;
+			handleSessionEvent(event, runState);
+		});
+
+		const entry = { sessionManager, session };
+		threadSessions.set(threadTs, entry);
+		log.logInfo(`[${channelId}] Created new thread session: ${threadTs}`);
+		return entry;
+	}
 
 	// Mutable per-run state - event handler references this
 	const runState: {
@@ -573,6 +601,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		};
 		stopReason: string;
 		errorMessage: string | undefined;
+		currentSession: AgentSession | null;
 	} = {
 		ctx: null,
 		logCtx: null,
@@ -587,14 +616,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		},
 		stopReason: "stop",
 		errorMessage: undefined,
+		currentSession: null,
 	};
 
-	// Subscribe to events ONCE
-	session.subscribe(async (event) => {
-		// Skip if no active run
-		if (!runState.ctx || !runState.logCtx || !runState.queue) return;
+	/** Handle session events (shared across all thread sessions) */
+	function handleSessionEvent(event: AgentEvent, state: typeof runState): void {
+		if (!state.ctx || !state.logCtx || !state.queue) return;
 
-		const { ctx, logCtx, queue, pendingTools } = runState;
+		const { ctx, logCtx, queue, pendingTools } = state;
 
 		if (event.type === "tool_execution_start") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
@@ -623,7 +652,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
 			}
 
-			// Post args + result to thread
 			const label = pending?.args ? (pending.args as { label?: string }).label : undefined;
 			const argsFormatted = pending
 				? formatToolArgsForSlack(agentEvent.toolName, pending.args as Record<string, unknown>)
@@ -651,22 +679,22 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				const assistantMsg = agentEvent.message as any;
 
 				if (assistantMsg.stopReason) {
-					runState.stopReason = assistantMsg.stopReason;
+					state.stopReason = assistantMsg.stopReason;
 				}
 				if (assistantMsg.errorMessage) {
-					runState.errorMessage = assistantMsg.errorMessage;
+					state.errorMessage = assistantMsg.errorMessage;
 				}
 
 				if (assistantMsg.usage) {
-					runState.totalUsage.input += assistantMsg.usage.input;
-					runState.totalUsage.output += assistantMsg.usage.output;
-					runState.totalUsage.cacheRead += assistantMsg.usage.cacheRead;
-					runState.totalUsage.cacheWrite += assistantMsg.usage.cacheWrite;
-					runState.totalUsage.cost.input += assistantMsg.usage.cost.input;
-					runState.totalUsage.cost.output += assistantMsg.usage.cost.output;
-					runState.totalUsage.cost.cacheRead += assistantMsg.usage.cost.cacheRead;
-					runState.totalUsage.cost.cacheWrite += assistantMsg.usage.cost.cacheWrite;
-					runState.totalUsage.cost.total += assistantMsg.usage.cost.total;
+					state.totalUsage.input += assistantMsg.usage.input;
+					state.totalUsage.output += assistantMsg.usage.output;
+					state.totalUsage.cacheRead += assistantMsg.usage.cacheRead;
+					state.totalUsage.cacheWrite += assistantMsg.usage.cacheWrite;
+					state.totalUsage.cost.input += assistantMsg.usage.cost.input;
+					state.totalUsage.cost.output += assistantMsg.usage.cost.output;
+					state.totalUsage.cost.cacheRead += assistantMsg.usage.cost.cacheRead;
+					state.totalUsage.cost.cacheWrite += assistantMsg.usage.cost.cacheWrite;
+					state.totalUsage.cost.total += assistantMsg.usage.cost.total;
 				}
 
 				const content = agentEvent.message.content;
@@ -712,7 +740,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				"retry",
 			);
 		}
-	});
+	}
 
 	// Slack message limit
 	const SLACK_MAX_LENGTH = 40000;
@@ -743,19 +771,28 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
 
-			// Sync messages from log.jsonl that arrived while we were offline or busy
-			// Exclude the current message (it will be added via prompt())
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
+			// Determine thread context:
+			// - If in an existing thread: use event.thread_ts
+			// - If top-level mention: use the message ts (will become thread parent)
+			const threadTs = ctx.message.thread_ts || ctx.message.ts;
+
+			// Get or create thread-specific session
+			const { sessionManager, session } = getThreadSession(threadTs);
+
+			// Store current session for abort()
+			runState.currentSession = session;
+
+			// Sync messages from log.jsonl for THIS THREAD only
+			// Only recent MAX_SYNC_MESSAGES are synced
+			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, threadTs, ctx.message.ts);
 			if (syncedCount > 0) {
-				log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
+				log.logInfo(`[${channelId}:${threadTs}] Synced ${syncedCount} messages from log.jsonl`);
 			}
 
-			// Reload messages from context.jsonl
-			// This picks up any messages synced above
+			// Reload messages from thread's context file
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
-				// Strip large binary data (images, video, etc.) from historical messages to avoid
-				// bloating API requests. Current turn images are passed separately via prompt().
+				// Strip large binary data from historical messages
 				let strippedCount = 0;
 				for (const msg of reloadedSession.messages) {
 					const content = (msg as any).content;
@@ -771,10 +808,23 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					}
 				}
 				if (strippedCount > 0) {
-					log.logInfo(`[${channelId}] Stripped ${strippedCount} large data block(s) from context`);
+					log.logInfo(`[${channelId}:${threadTs}] Stripped ${strippedCount} large data block(s) from context`);
 				}
-				agent.replaceMessages(reloadedSession.messages);
-				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
+
+				// Limit to most recent MAX_CONTEXT_MESSAGES messages
+				const messages = reloadedSession.messages;
+				const trimmedMessages = messages.length > MAX_CONTEXT_MESSAGES
+					? messages.slice(messages.length - MAX_CONTEXT_MESSAGES)
+					: messages;
+				if (messages.length > MAX_CONTEXT_MESSAGES) {
+					log.logInfo(`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`);
+				}
+
+				agent.replaceMessages(trimmedMessages);
+				log.logInfo(`[${channelId}:${threadTs}] Loaded ${trimmedMessages.length} messages from context`);
+			} else {
+				// New thread - clear any messages from previous thread
+				agent.replaceMessages([]);
 			}
 
 			// Update system prompt with fresh memory, channel/user info, and skills
@@ -1000,12 +1050,15 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			runState.ctx = null;
 			runState.logCtx = null;
 			runState.queue = null;
+			runState.currentSession = null;
 
 			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
 		},
 
 		abort(): void {
-			session.abort();
+			if (runState.currentSession) {
+				runState.currentSession.abort();
+			}
 		},
 	};
 }

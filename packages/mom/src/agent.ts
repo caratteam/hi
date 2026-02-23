@@ -661,8 +661,12 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		});
 
 		// Subscribe to events for this session (same handler for all threads)
+		// Guard: only handle events if THIS session is the currently active one.
+		// Since all sessions share the same Agent, the Agent's event listeners
+		// fire for ALL sessions, causing duplicate handling without this check.
 		session.subscribe(async (event: AgentSessionEvent) => {
 			if (!runState.ctx || !runState.logCtx || !runState.queue) return;
+			if (runState.currentSession !== session) return;
 			handleSessionEvent(event, runState);
 		});
 

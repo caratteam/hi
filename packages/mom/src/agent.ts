@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent } from "@mariozechner/pi-ai";
+import { getModel, type ImageContent, type UserMessage } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	type AgentSessionEvent,
@@ -17,7 +17,7 @@ import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
+import { getLogMessages, MomSettingsManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
@@ -875,13 +875,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			// Store current session for abort()
 			runState.currentSession = session;
 
-			// Sync messages from log.jsonl for THIS THREAD only
-			// Only recent MAX_SYNC_MESSAGES are synced
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, threadTs, ctx.message.ts);
-			if (syncedCount > 0) {
-				log.logInfo(`[${channelId}:${threadTs}] Synced ${syncedCount} messages from log.jsonl`);
-			}
-
 			// Reload messages from thread's context file
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
@@ -907,25 +900,57 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					log.logInfo(`[${channelId}:${threadTs}] Stripped ${strippedCount} large data block(s) from context`);
 				}
 
-				// Limit to most recent MAX_CONTEXT_MESSAGES messages
+				// Step 1: Trim context.jsonl to most recent MAX_CONTEXT_MESSAGES
 				const messages = reloadedSession.messages;
-				let trimmedMessages =
-					messages.length > MAX_CONTEXT_MESSAGES
-						? messages.slice(messages.length - MAX_CONTEXT_MESSAGES)
-						: messages;
-				if (messages.length > MAX_CONTEXT_MESSAGES) {
+				const contextWasTrimmed = messages.length > MAX_CONTEXT_MESSAGES;
+				let trimmedMessages = contextWasTrimmed ? messages.slice(messages.length - MAX_CONTEXT_MESSAGES) : messages;
+				if (contextWasTrimmed) {
 					log.logInfo(
 						`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`,
 					);
 				}
 
-				// Sanitize tool_use/tool_result pairs after trimming.
-				// Claude API requires every tool_result to have a matching tool_use in the previous message.
-				// After slicing, orphan tool_results (whose tool_use was trimmed away) cause 400 errors.
+				// Sanitize tool_use/tool_result pairs after trimming
 				trimmedMessages = sanitizeToolPairs(trimmedMessages, log, channelId, threadTs);
 
-				agent.replaceMessages(trimmedMessages);
-				log.logInfo(`[${channelId}:${threadTs}] Loaded ${trimmedMessages.length} messages from context`);
+				// Step 2: Get conversation history from log.jsonl, deduplicated against trimmed context
+				const logMessages = getLogMessages(channelDir, threadTs, ctx.message.ts, trimmedMessages);
+				if (logMessages.length > 0) {
+					log.logInfo(`[${channelId}:${threadTs}] Prepending ${logMessages.length} messages from log.jsonl`);
+				}
+
+				// Step 3: Build final message array
+				// [log truncation notice?] [log messages] [context trim notice?] [trimmed context messages]
+				const finalMessages: any[] = [];
+
+				// Add log messages (conversation history) first
+				if (logMessages.length > 0) {
+					finalMessages.push(...logMessages);
+				}
+
+				// Add context trim notice if context was trimmed
+				if (contextWasTrimmed) {
+					const omitted = messages.length - MAX_CONTEXT_MESSAGES;
+					const contextNotice: UserMessage = {
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: `[... ${omitted}개의 이전 tool 호출/결과 메시지 생략 ...]`,
+							},
+						],
+						timestamp: Date.now(),
+					};
+					finalMessages.push(contextNotice);
+				}
+
+				// Add trimmed context messages
+				finalMessages.push(...trimmedMessages);
+
+				agent.replaceMessages(finalMessages);
+				log.logInfo(
+					`[${channelId}:${threadTs}] Loaded ${finalMessages.length} messages (${logMessages.length} from log + ${trimmedMessages.length} from context)`,
+				);
 			} else {
 				// New thread - clear any messages from previous thread
 				agent.replaceMessages([]);

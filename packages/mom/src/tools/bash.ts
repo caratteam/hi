@@ -16,6 +16,27 @@ function getTempFilePath(): string {
 	return join(tmpdir(), `mom-bash-${id}.log`);
 }
 
+/**
+ * Commands that are blocked from execution to protect the server.
+ * These are matched against the command string using word boundaries.
+ */
+const BLOCKED_COMMANDS = ["ffmpeg", "ffprobe"];
+
+/**
+ * Check if a command contains any blocked commands.
+ * Returns the blocked command name if found, null otherwise.
+ */
+function findBlockedCommand(command: string): string | null {
+	for (const blocked of BLOCKED_COMMANDS) {
+		// Match as a word boundary — handles pipes, &&, $(), etc.
+		const pattern = new RegExp(`\\b${blocked}\\b`);
+		if (pattern.test(command)) {
+			return blocked;
+		}
+	}
+	return null;
+}
+
 const bashSchema = Type.Object({
 	label: Type.String({ description: "Brief description of what this command does (shown to user)" }),
 	command: Type.String({ description: "Bash command to execute" }),
@@ -38,6 +59,14 @@ export function createBashTool(executor: Executor, getUserId: () => string | und
 			{ command, timeout }: { label: string; command: string; timeout?: number },
 			signal?: AbortSignal,
 		) => {
+			// Check for blocked commands (server protection)
+			const blockedCmd = findBlockedCommand(command);
+			if (blockedCmd) {
+				throw new Error(
+					`Command '${blockedCmd}' is blocked. This server has limited resources (2GB RAM, 2 vCPUs) and ${blockedCmd} could crash it. Instead, use the carat-agent skill to request the task — the Carat Agent server has sufficient resources to handle ${blockedCmd} workloads.`,
+				);
+			}
+
 			// Check access control
 			const userId = getUserId();
 			if (userId) {

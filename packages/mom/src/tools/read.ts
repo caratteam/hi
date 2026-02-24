@@ -6,22 +6,77 @@ import type { Executor } from "../sandbox.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 /**
- * Map of file extensions to MIME types for common image formats
+ * Binary file extensions that should NOT be read as text.
+ * Returns a descriptive category for each.
  */
-const IMAGE_MIME_TYPES: Record<string, string> = {
-	".jpg": "image/jpeg",
-	".jpeg": "image/jpeg",
-	".png": "image/png",
-	".gif": "image/gif",
-	".webp": "image/webp",
+const BINARY_EXTENSIONS: Record<string, string> = {
+	// Images
+	".jpg": "image",
+	".jpeg": "image",
+	".png": "image",
+	".gif": "image",
+	".webp": "image",
+	".bmp": "image",
+	".tiff": "image",
+	".tif": "image",
+	".ico": "image",
+	".svg": "text", // SVG is actually text/XML, so we allow reading it
+	// Video
+	".mp4": "video",
+	".mov": "video",
+	".avi": "video",
+	".mkv": "video",
+	".webm": "video",
+	".flv": "video",
+	".wmv": "video",
+	// Audio
+	".mp3": "audio",
+	".wav": "audio",
+	".flac": "audio",
+	".aac": "audio",
+	".ogg": "audio",
+	".m4a": "audio",
+	".wma": "audio",
+	// Archives
+	".zip": "archive",
+	".tar": "archive",
+	".gz": "archive",
+	".bz2": "archive",
+	".xz": "archive",
+	".7z": "archive",
+	".rar": "archive",
+	// Other binary
+	".pdf": "document",
+	".doc": "document",
+	".docx": "document",
+	".xls": "spreadsheet",
+	".xlsx": "spreadsheet",
+	".ppt": "presentation",
+	".pptx": "presentation",
+	".woff": "font",
+	".woff2": "font",
+	".ttf": "font",
+	".otf": "font",
+	".exe": "executable",
+	".dll": "library",
+	".so": "library",
+	".dylib": "library",
+	".o": "object",
+	".a": "archive",
+	".class": "compiled",
+	".pyc": "compiled",
+	".wasm": "compiled",
 };
 
 /**
- * Check if a file is an image based on its extension
+ * Check if a file is binary based on its extension.
+ * Returns the category string if binary, null if text.
  */
-function isImageFile(filePath: string): string | null {
+function getBinaryCategory(filePath: string): string | null {
 	const ext = extname(filePath).toLowerCase();
-	return IMAGE_MIME_TYPES[ext] || null;
+	const category = BINARY_EXTENSIONS[ext];
+	if (category === "text") return null; // SVG etc.
+	return category || null;
 }
 
 const readSchema = Type.Object({
@@ -39,27 +94,52 @@ export function createReadTool(executor: Executor): AgentTool<typeof readSchema>
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+		description: `Read the contents of a file. Supports text files only. For binary files (images, videos, audio, etc.), returns file metadata instead. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
 		parameters: readSchema,
 		execute: async (
 			_toolCallId: string,
 			{ path, offset, limit }: { label: string; path: string; offset?: number; limit?: number },
 			signal?: AbortSignal,
 		): Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }> => {
-			const mimeType = isImageFile(path);
+			const binaryCategory = getBinaryCategory(path);
 
-			if (mimeType) {
-				// Read as image (binary) - use base64
-				const result = await executor.exec(`base64 < ${shellEscape(path)}`, { signal });
-				if (result.code !== 0) {
-					throw new Error(result.stderr || `Failed to read file: ${path}`);
+			if (binaryCategory) {
+				// Binary file — return metadata only, never base64
+				const metaResult = await executor.exec(
+					`stat -c '%s' ${shellEscape(path)} 2>/dev/null || stat -f '%z' ${shellEscape(path)} 2>/dev/null`,
+					{ signal },
+				);
+				if (metaResult.code !== 0) {
+					throw new Error(metaResult.stderr || `Failed to read file: ${path}`);
 				}
-				const base64 = result.stdout.replace(/\s/g, ""); // Remove whitespace from base64
+				const fileSize = Number.parseInt(metaResult.stdout.trim(), 10);
+				const fileSizeStr =
+					fileSize > 1024 * 1024
+						? `${(fileSize / (1024 * 1024)).toFixed(1)}MB`
+						: fileSize > 1024
+							? `${(fileSize / 1024).toFixed(1)}KB`
+							: `${fileSize}B`;
+
+				// For images, try to get dimensions
+				let extraInfo = "";
+				if (binaryCategory === "image") {
+					const identifyResult = await executor.exec(`file ${shellEscape(path)}`, { signal });
+					if (identifyResult.code === 0) {
+						extraInfo = `\nfile info: ${identifyResult.stdout.trim()}`;
+					}
+				} else if (binaryCategory === "video" || binaryCategory === "audio") {
+					const probeResult = await executor.exec(`file ${shellEscape(path)}`, { signal });
+					if (probeResult.code === 0) {
+						extraInfo = `\nfile info: ${probeResult.stdout.trim()}`;
+					}
+				}
 
 				return {
 					content: [
-						{ type: "text", text: `Read image file [${mimeType}]` },
-						{ type: "image", data: base64, mimeType },
+						{
+							type: "text",
+							text: `[Binary file: ${binaryCategory}] ${path}\nsize: ${fileSizeStr}${extraInfo}\n\nThis is a binary file. Use bash commands to inspect or process it (e.g., ffprobe for video, identify for images).`,
+						},
 					],
 					details: undefined,
 				};

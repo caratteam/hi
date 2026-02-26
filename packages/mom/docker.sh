@@ -42,7 +42,7 @@ case "$1" in
       touch "$DOCKER_ENV_FILE"
     fi
 
-    docker run -d \
+    docker run -d --init \
       --name "$CONTAINER_NAME" \
       --env-file "$DOCKER_ENV_FILE" \
       -v "${DATA_DIR}:/workspace" \

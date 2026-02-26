@@ -271,10 +271,12 @@ export class MomSettingsManager {
 	}
 
 	getDefaultModel(): string | undefined {
+		this.settings = this.load();
 		return this.settings.defaultModel;
 	}
 
 	getDefaultProvider(): string | undefined {
+		this.settings = this.load();
 		return this.settings.defaultProvider;
 	}
 

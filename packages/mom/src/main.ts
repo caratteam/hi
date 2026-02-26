@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { join, resolve } from "path";
-import { type AgentRunner, getAnthropicKey, getOrCreateRunner } from "./agent.js";
+import { type AgentRunner, callBedrockHaiku, getAnthropicKey, getOrCreateRunner } from "./agent.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
@@ -429,6 +429,7 @@ const bot = new SlackBotClass(handler, {
 	workingDir,
 	store: sharedStore,
 	getApiKey: getAnthropicKey,
+	callHaiku: callBedrockHaiku,
 });
 
 // Start events watcher

@@ -25,7 +25,7 @@ import type { ChannelStore } from "./store.js";
 import { createMomTools } from "./tools/index.js";
 
 // Hardcoded model for now - TODO: make configurable (issue #63)
-const model = getModel("openrouter", "google/gemini-3.1-pro-preview");
+const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1");
 
 export interface PendingMessage {
 	userName: string;
@@ -70,6 +70,33 @@ export async function getAnthropicKey(): Promise<string> {
 		sharedAuthStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
 	}
 	return getProviderApiKey(sharedAuthStorage, "anthropic");
+}
+
+/**
+ * Call Bedrock Haiku for lightweight classification tasks.
+ * Returns the response text, or fallback on error.
+ * Uses AWS credentials from process.env (set via .mom-env).
+ */
+export async function callBedrockHaiku(prompt: string, fallback: string): Promise<string> {
+	try {
+		const { BedrockRuntimeClient, ConverseCommand } = await import("@aws-sdk/client-bedrock-runtime");
+		const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
+		const client = new BedrockRuntimeClient({ region });
+		const command = new ConverseCommand({
+			modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+			messages: [{ role: "user", content: [{ text: prompt }] }],
+			inferenceConfig: { maxTokens: 100 },
+		});
+		const response = await client.send(command);
+		const output = response.output;
+		if (output?.message?.content?.[0] && "text" in output.message.content[0]) {
+			return output.message.content[0].text?.trim() || fallback;
+		}
+		return fallback;
+	} catch (err) {
+		log.logWarning("Bedrock Haiku call error", err instanceof Error ? err.message : String(err));
+		return fallback;
+	}
 }
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
@@ -433,7 +460,11 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 	carat: "CARAT_AGENT_TOKEN",
 	anthropic: "ANTHROPIC_API_KEY",
 	openrouter: "OPENROUTER_API_KEY",
+	"amazon-bedrock": "AWS_ACCESS_KEY_ID",
 };
+
+/** Additional AWS env vars needed for Bedrock authentication in sandbox */
+const AWS_ENV_KEYS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"];
 
 /** Maximum number of messages to keep from context file when loading */
 const MAX_CONTEXT_MESSAGES = 20;
@@ -567,6 +598,12 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	for (const envVar of Object.values(PROVIDER_ENV_KEYS)) {
 		if (process.env[envVar]) {
 			sandboxEnv[envVar] = process.env[envVar]!;
+		}
+	}
+	// Pass through all AWS env vars for Bedrock access in sandbox
+	for (const key of AWS_ENV_KEYS) {
+		if (process.env[key]) {
+			sandboxEnv[key] = process.env[key]!;
 		}
 	}
 	// Also pass through DB_* and other useful env vars

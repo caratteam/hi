@@ -153,6 +153,7 @@ export class SlackBot {
 	private channels = new Map<string, SlackChannel>();
 	private queues = new Map<string, ChannelQueue>();
 	private getApiKey?: () => Promise<string>;
+	private callHaikuOverride?: (prompt: string, fallback: string) => Promise<string>;
 
 	/**
 	 * Max number of non-bot messages after bot's last reply before disengaging.
@@ -168,12 +169,14 @@ export class SlackBot {
 			workingDir: string;
 			store: ChannelStore;
 			getApiKey?: () => Promise<string>;
+			callHaiku?: (prompt: string, fallback: string) => Promise<string>;
 		},
 	) {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
 		this.store = config.store;
 		this.getApiKey = config.getApiKey;
+		this.callHaikuOverride = config.callHaiku;
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 	}
@@ -340,7 +343,7 @@ export class SlackBot {
 			/* ignore */
 		}
 
-		return isMessageForBot(messageText, userName, context, this.getApiKey);
+		return isMessageForBot(messageText, userName, context, this.getApiKey, this.callHaikuOverride);
 	}
 
 	/**
@@ -968,7 +971,7 @@ export class SlackBot {
 		}
 
 		// Interpret the emoji reaction using a lightweight LLM
-		const interpretation = await interpretReaction(emoji, this.getApiKey);
+		const interpretation = await interpretReaction(emoji, this.getApiKey, this.callHaikuOverride);
 		log.logInfo(`[${channel}] Reaction :${emoji}: interpreted as "${interpretation}"`);
 
 		if (interpretation === "ignore") return;
@@ -1061,7 +1064,11 @@ async function callHaiku(prompt: string, fallback: string, getApiKey?: () => Pro
 /**
  * Interpret a Slack emoji reaction using Haiku.
  */
-async function interpretReaction(emoji: string, getApiKey?: () => Promise<string>): Promise<string> {
+async function interpretReaction(
+	emoji: string,
+	getApiKey?: () => Promise<string>,
+	callHaikuOverride?: (prompt: string, fallback: string) => Promise<string>,
+): Promise<string> {
 	const prompt = `A user reacted to an AI assistant's Slack message with the emoji :${emoji}:
 
 Interpret what the user likely means by this reaction. Consider possibilities like:
@@ -1076,7 +1083,8 @@ Interpret what the user likely means by this reaction. Consider possibilities li
 Reply with a SHORT phrase describing the user's intent (e.g. "승인", "거절", "재미있다는 반응", "감탄", "궁금해하는 반응").
 If the emoji is too ambiguous or meaningless to interpret, reply with exactly "ignore".`;
 
-	const result = await callHaiku(prompt, "ignore", getApiKey);
+	const haikuFn = callHaikuOverride || ((p: string, f: string) => callHaiku(p, f, getApiKey));
+	const result = await haikuFn(prompt, "ignore");
 	return result.toLowerCase() === "ignore" ? "ignore" : result;
 }
 
@@ -1089,6 +1097,7 @@ async function isMessageForBot(
 	userName: string,
 	recentContext: string,
 	getApiKey?: () => Promise<string>,
+	callHaikuOverride?: (prompt: string, fallback: string) => Promise<string>,
 ): Promise<boolean> {
 	const prompt = `You are "나노캐럿(Mom)", an AI assistant in a Slack channel. You recently participated in a conversation.
 
@@ -1106,6 +1115,7 @@ Is this new message directed at you (the AI assistant)? Consider:
 
 When in doubt, answer "yes". Reply with exactly "yes" or "no".`;
 
-	const result = await callHaiku(prompt, "no", getApiKey);
+	const haikuFn = callHaikuOverride || ((p: string, f: string) => callHaiku(p, f, getApiKey));
+	const result = await haikuFn(prompt, "no");
 	return result.toLowerCase().startsWith("yes");
 }

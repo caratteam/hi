@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [0.55.1] - 2026-02-26
+
+### New Features
+
+- Added offline startup mode via `--offline` (or `PI_OFFLINE`) to disable startup network operations, with startup network timeouts to avoid hangs in restricted or offline environments.
+- Added `gemini-3.1-pro-preview` model support to the `google-gemini-cli` provider ([#1599](https://github.com/badlogic/pi-mono/pull/1599) by [@audichuang](https://github.com/audichuang)).
+
+### Fixed
+
+- Fixed offline startup hangs by adding offline startup behavior and network timeouts during managed tool setup ([#1631](https://github.com/badlogic/pi-mono/pull/1631) by [@mcollina](https://github.com/mcollina))
+- Fixed Windows VT input initialization in ESM by loading koffi via createRequire, avoiding runtime and bundling issues in end-user environments ([#1627](https://github.com/badlogic/pi-mono/pull/1627) by [@kaste](https://github.com/kaste))
+- Fixed managed `fd`/`rg` bootstrap on Windows in Git Bash by using `extract-zip` for `.zip` archives, searching extracted layouts more robustly, and isolating extraction temp directories to avoid concurrent download races ([#1348](https://github.com/badlogic/pi-mono/issues/1348))
+- Fixed extension loading on Windows when resolving `@sinclair/typebox` aliases so subpath imports like `@sinclair/typebox/compiler` resolve correctly.
+- Fixed adaptive thinking for Claude Sonnet 4.6 in Anthropic and Bedrock providers, and clamped unsupported `xhigh` effort values to supported levels ([#1548](https://github.com/badlogic/pi-mono/pull/1548) by [@tctev](https://github.com/tctev))
+- Fixed Vertex ADC credential detection race by avoiding caching a false negative during async import initialization ([#1550](https://github.com/badlogic/pi-mono/pull/1550) by [@jeremiahgaylord-web](https://github.com/jeremiahgaylord-web))
+- Fixed subagent extension example to resolve user agents from the configured agent directory instead of hardcoded paths ([#1559](https://github.com/badlogic/pi-mono/pull/1559) by [@tianshuwang](https://github.com/tianshuwang))
+
+## [0.55.0] - 2026-02-24
+
+### Breaking Changes
+
+- Resource precedence for extensions, skills, prompts, themes, and slash-command name collisions is now project-first (`cwd/.pi`) before user-global (`~/.pi/agent`). If you relied on global resources overriding project resources with the same names, rename or reorder your resources.
+- Extension registration conflicts no longer unload the entire later extension. All extensions stay loaded, and conflicting command/tool/flag names are resolved by first registration in load order.
+
+## [0.54.2] - 2026-02-23
+
+### Fixed
+
+- Fixed `.pi` folder being created unnecessarily when only reading settings. The folder is now only created when writing project-specific settings.
+- Fixed extension-driven runtime theme changes to persist in settings so `/settings` reflects the active `currentTheme` after `ctx.ui.setTheme(...)` ([#1483](https://github.com/badlogic/pi-mono/pull/1483) by [@ferologics](https://github.com/ferologics))
+- Fixed interactive mode freezes during large streaming `write` tool calls by using incremental syntax highlighting while partial arguments stream, with a final full re-highlight after tool-call arguments complete.
+
+## [0.54.1] - 2026-02-22
+
+### Fixed
+
+- Externalized koffi from bun binary builds, reducing archive sizes by ~15MB per platform (e.g. darwin-arm64: 43MB -> 28MB). Koffi's Windows-only `.node` file is now shipped alongside the Windows binary only.
+
 ## [0.54.0] - 2026-02-19
 
 ### Added

@@ -1,6 +1,6 @@
 # 🏖️ OSS Vacation
 
-**Issue tracker and PRs reopen February 23, 2026.**
+**Issue tracker and PRs reopen March 2, 2026.**
 
 All PRs will be auto-closed until then. Approved contributors can submit PRs after vacation without reapproval. For support, join [Discord](https://discord.com/invite/3cU7Bz4UPx).
 
@@ -385,7 +385,7 @@ import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "
 
 const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
-  authStorage: new AuthStorage(),
+  authStorage: AuthStorage.create(),
   modelRegistry: new ModelRegistry(authStorage),
 });
 

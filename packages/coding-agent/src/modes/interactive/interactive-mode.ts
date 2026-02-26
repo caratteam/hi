@@ -572,10 +572,12 @@ export class InteractiveMode {
 	 * Check npm registry for a newer version.
 	 */
 	private async checkForNewVersion(): Promise<string | undefined> {
-		if (process.env.PI_SKIP_VERSION_CHECK) return undefined;
+		if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
 		try {
-			const response = await fetch("https://registry.npmjs.org/@mariozechner/pi-coding-agent/latest");
+			const response = await fetch("https://registry.npmjs.org/@mariozechner/pi-coding-agent/latest", {
+				signal: AbortSignal.timeout(10000),
+			});
 			if (!response.ok) return undefined;
 
 			const data = (await response.json()) as { version?: string };
@@ -729,7 +731,7 @@ export class InteractiveMode {
 			}
 		}
 
-		return [groups.user, groups.project, groups.path].filter(
+		return [groups.project, groups.user, groups.path].filter(
 			(group) => group.paths.length > 0 || group.packages.size > 0,
 		);
 	}
@@ -1427,6 +1429,9 @@ export class InteractiveMode {
 				}
 				const result = setTheme(themeOrName, true);
 				if (result.success) {
+					if (this.settingsManager.getTheme() !== themeOrName) {
+						this.settingsManager.setTheme(themeOrName);
+					}
 					this.ui.requestRender();
 				}
 				return result;

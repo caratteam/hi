@@ -1003,6 +1003,16 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			);
 			session.agent.setSystemPrompt(systemPrompt);
 
+			// Dynamic model override from settings.json
+			const savedProvider = settingsManager.getDefaultProvider();
+			const savedModelId = settingsManager.getDefaultModel();
+			if (savedProvider && savedModelId) {
+				const dynamicModel = getModel(savedProvider as any, savedModelId as any);
+				if (dynamicModel) {
+					session.agent.setModel(dynamicModel);
+				}
+			}
+
 			// Set up file upload function for this run's context
 			currentUploadFn = async (filePath: string, title?: string) => {
 				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId);

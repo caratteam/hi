@@ -7797,12 +7797,12 @@ export const MODELS = {
 			reasoning: false,
 			input: ["text"],
 			cost: {
-				input: 0.5,
-				output: 2.4,
+				input: 0.55,
+				output: 2.2,
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
-			contextWindow: 131072,
+			contextWindow: 131000,
 			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k2-0905": {

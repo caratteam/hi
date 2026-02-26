@@ -16,7 +16,7 @@ jobs:
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           script: |
             source ~/.mom-env
-            cd ~/pi-mono
+            cd ~/hi
             git fetch origin hansol
             git checkout hansol
             git pull origin hansol

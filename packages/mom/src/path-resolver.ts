@@ -72,7 +72,7 @@ export function containerToHostPath(containerPath: string): string {
 
 	// Try to match against known mount points
 	for (const mapping of mappings) {
-		if (containerPath.startsWith(mapping.containerPath + "/") || containerPath === mapping.containerPath) {
+		if (containerPath.startsWith(`${mapping.containerPath}/`) || containerPath === mapping.containerPath) {
 			// Replace container path prefix with host path prefix
 			return containerPath.replace(mapping.containerPath, mapping.hostPath);
 		}

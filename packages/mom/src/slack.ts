@@ -16,7 +16,7 @@ const SLACK_MAX_TEXT = 39000;
 function truncateForSlack(text: string): string {
 	if (text.length > SLACK_MAX_TEXT) {
 		log.logWarning(`Truncating Slack message: ${text.length} chars -> ${SLACK_MAX_TEXT} chars`);
-		return text.substring(0, SLACK_MAX_TEXT) + "\n\n_... (truncated, response too long)_";
+		return `${text.substring(0, SLACK_MAX_TEXT)}\n\n_... (truncated, response too long)_`;
 	}
 	return text;
 }
@@ -1025,7 +1025,7 @@ async function callHaiku(prompt: string, fallback: string, getApiKey?: () => Pro
 			"content-type": "application/json",
 		};
 		if (isOAuth) {
-			headers["authorization"] = `Bearer ${apiKey}`;
+			headers.authorization = `Bearer ${apiKey}`;
 			headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
 			headers["anthropic-dangerous-direct-browser-access"] = "true";
 			headers["user-agent"] = "claude-cli/2.1.2 (external, cli)";

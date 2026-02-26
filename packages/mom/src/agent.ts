@@ -25,7 +25,7 @@ import type { ChannelStore } from "./store.js";
 import { createMomTools } from "./tools/index.js";
 
 // Hardcoded model for now - TODO: make configurable (issue #63)
-const model = getModel("anthropic", "claude-opus-4-6");
+const model = getModel("openrouter", "google/gemini-3-flash-preview");
 
 export interface PendingMessage {
 	userName: string;
@@ -46,24 +46,25 @@ export interface AgentRunner {
 /** Shared AuthStorage instance for API key access */
 let sharedAuthStorage: AuthStorage | null = null;
 
+/** Get API key for a given provider */
+async function getProviderApiKey(authStorage: AuthStorage, provider: string): Promise<string> {
+	const key = await authStorage.getApiKey(provider);
+	if (!key) {
+		throw new Error(
+			`No API key found for ${provider}.\n\n` +
+				"Set an API key environment variable, or use /login and link to auth.json from " +
+				join(homedir(), ".pi", "mom", "auth.json"),
+		);
+	}
+	return key;
+}
+
 /** Get Anthropic API key for lightweight operations (e.g. reaction classification) */
 export async function getAnthropicKey(): Promise<string> {
 	if (!sharedAuthStorage) {
 		sharedAuthStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
 	}
-	return getAnthropicApiKey(sharedAuthStorage);
-}
-
-async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
-	const key = await authStorage.getApiKey("anthropic");
-	if (!key) {
-		throw new Error(
-			"No API key found for anthropic.\n\n" +
-				"Set an API key environment variable, or use /login with Anthropic and link to auth.json from " +
-				join(homedir(), ".pi", "mom", "auth.json"),
-		);
-	}
-	return key;
+	return getProviderApiKey(sharedAuthStorage, "anthropic");
 }
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
@@ -426,6 +427,7 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 	openai: "OPENAI_API_KEY",
 	carat: "CARAT_AGENT_TOKEN",
 	anthropic: "ANTHROPIC_API_KEY",
+	openrouter: "OPENROUTER_API_KEY",
 };
 
 /** Maximum number of messages to keep from context file when loading */
@@ -620,7 +622,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			tools,
 		},
 		convertToLlm,
-		getApiKey: async () => getAnthropicApiKey(authStorage),
+		getApiKey: async (provider?: string) => getProviderApiKey(authStorage, provider || model.provider),
 	});
 
 	const resourceLoader: ResourceLoader = {

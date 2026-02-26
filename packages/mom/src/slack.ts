@@ -2,6 +2,7 @@ import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
+import { getAdminUsers } from "./access-control.js";
 import * as log from "./log.js";
 import type { Attachment, ChannelStore } from "./store.js";
 
@@ -160,6 +161,9 @@ export class SlackBot {
 	 * If more than this many messages pass without bot involvement, stop auto-responding.
 	 */
 	private static readonly CONVERSATION_MAX_GAP = 5;
+
+	/** Admin user IDs that are allowed to trigger bot responses. Others are logged but ignored. */
+	private static readonly ADMIN_USER_SET = new Set(getAdminUsers());
 
 	constructor(
 		handler: MomHandler,
@@ -488,6 +492,15 @@ export class SlackBot {
 			// Also downloads attachments in background and stores local paths
 			slackEvent.attachments = this.logUserMessage(slackEvent);
 
+			// Only respond to allowed user
+			if (!SlackBot.ADMIN_USER_SET.has(e.user)) {
+				log.logInfo(
+					`[${e.channel}] Ignoring mention from ${this.users.get(e.user)?.userName || e.user} (not admin)`,
+				);
+				ack();
+				return;
+			}
+
 			// Only trigger processing for messages AFTER startup (not replayed old messages)
 			if (this.startupTs && e.ts < this.startupTs) {
 				log.logInfo(
@@ -536,6 +549,9 @@ export class SlackBot {
 
 			// Only care about reactions on mom's messages
 			if (e.item_user !== this.botUserId) return;
+
+			// Only respond to allowed user's reactions
+			if (!SlackBot.ADMIN_USER_SET.has(e.user)) return;
 
 			// Skip if before startup
 			if (this.startupTs && e.item.ts < this.startupTs) return;
@@ -622,9 +638,10 @@ export class SlackBot {
 			}
 
 			// Determine if we should handle this message
-			let shouldHandle = isDM;
+			// Only respond to admin users (others are still logged above)
+			let shouldHandle = isDM && SlackBot.ADMIN_USER_SET.has(e.user);
 
-			if (!isDM && !isBotMention) {
+			if (!isDM && !isBotMention && SlackBot.ADMIN_USER_SET.has(e.user)) {
 				const msgGap = this.getMessagesSinceLastReply(e.channel, e.thread_ts);
 				if (msgGap >= 0 && msgGap <= SlackBot.CONVERSATION_MAX_GAP) {
 					// Mom recently participated in this thread/channel. Ask Haiku if this message is directed at Mom.

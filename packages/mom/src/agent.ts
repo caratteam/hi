@@ -25,7 +25,7 @@ import type { ChannelStore } from "./store.js";
 import { createMomTools } from "./tools/index.js";
 
 // Hardcoded model for now - TODO: make configurable (issue #63)
-const model = getModel("openrouter", "google/gemini-3-flash-preview");
+const model = getModel("openrouter", "google/gemini-3.1-pro-preview");
 
 export interface PendingMessage {
 	userName: string;

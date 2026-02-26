@@ -1004,12 +1004,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			session.agent.setSystemPrompt(systemPrompt);
 
 			// Dynamic model override from settings.json
+			let actualModel = model; // Start with default
 			const savedProvider = settingsManager.getDefaultProvider();
 			const savedModelId = settingsManager.getDefaultModel();
 			if (savedProvider && savedModelId) {
 				const dynamicModel = getModel(savedProvider as any, savedModelId as any);
 				if (dynamicModel) {
 					session.agent.setModel(dynamicModel);
+					actualModel = dynamicModel; // Track actual model used
 				}
 			}
 
@@ -1216,14 +1218,14 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 						lastAssistantMessage.usage.cacheRead +
 						lastAssistantMessage.usage.cacheWrite
 					: 0;
-				const contextWindow = model.contextWindow || 200000;
+				const contextWindow = actualModel.contextWindow || 200000;
 
 				const summary = log.logUsageSummary(
 					runState.logCtx!,
 					runState.totalUsage,
 					contextTokens,
 					contextWindow,
-					model.id,
+					actualModel.id,
 				);
 				runState.queue.enqueue(() => ctx.respondInThread(summary, true), "usage summary");
 				await queueChain;

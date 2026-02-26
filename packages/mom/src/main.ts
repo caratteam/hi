@@ -13,6 +13,19 @@ import { ChannelStore } from "./store.js";
 // Config
 // ============================================================================
 
+// Map .mom-env variable names to the names expected by pi-ai / sandbox
+// (only set if the target env var is not already set)
+const envAliases: [string, string][] = [
+	["FAL_TOKEN", "FAL_KEY"],
+	["CARAT_TOKEN", "CARAT_AGENT_TOKEN"],
+	["OPENROUTER_TOKEN", "OPENROUTER_API_KEY"],
+];
+for (const [src, dst] of envAliases) {
+	if (process.env[src] && !process.env[dst]) {
+		process.env[dst] = process.env[src];
+	}
+}
+
 const MOM_SLACK_APP_TOKEN = process.env.MOM_SLACK_APP_TOKEN;
 const MOM_SLACK_BOT_TOKEN = process.env.MOM_SLACK_BOT_TOKEN;
 

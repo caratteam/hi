@@ -46,14 +46,19 @@ export interface AgentRunner {
 /** Shared AuthStorage instance for API key access */
 let sharedAuthStorage: AuthStorage | null = null;
 
-/** Get API key for a given provider */
+/** Get API key for a given provider, checking process.env first then AuthStorage */
 async function getProviderApiKey(authStorage: AuthStorage, provider: string): Promise<string> {
+	// Check process.env first (populated by .mom-env)
+	const envKey = PROVIDER_ENV_KEYS[provider];
+	if (envKey && process.env[envKey]) {
+		return process.env[envKey]!;
+	}
+	// Fall back to AuthStorage (reads auth.json + env vars via pi-ai)
 	const key = await authStorage.getApiKey(provider);
 	if (!key) {
 		throw new Error(
 			`No API key found for ${provider}.\n\n` +
-				"Set an API key environment variable, or use /login and link to auth.json from " +
-				join(homedir(), ".pi", "mom", "auth.json"),
+				"Set the key in ~/.mom-env (e.g. OPENROUTER_TOKEN=...) or as an environment variable.",
 		);
 	}
 	return key;
@@ -557,29 +562,18 @@ function getContextFilePath(channelDir: string, threadTs?: string): string {
 }
 
 function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
-	// Load API keys from AuthStorage to inject into sandbox environment
-	const authPath = join(homedir(), ".pi", "mom", "auth.json");
+	// Load API keys from process.env (set via .mom-env) to inject into sandbox environment
 	const sandboxEnv: Record<string, string> = {};
-	try {
-		if (existsSync(authPath)) {
-			const authData = JSON.parse(readFileSync(authPath, "utf-8"));
-			for (const [provider, envVar] of Object.entries(PROVIDER_ENV_KEYS)) {
-				const cred = authData[provider];
-				if (cred?.type === "api_key" && cred.key) {
-					sandboxEnv[envVar] = cred.key;
-				} else if (cred?.type === "oauth" && cred.access) {
-					sandboxEnv[envVar] = cred.access;
-					if (cred.refresh) {
-						sandboxEnv[`${envVar}_REFRESH`] = cred.refresh;
-					}
-					if (cred.expires) {
-						sandboxEnv[`${envVar}_EXPIRES`] = String(cred.expires);
-					}
-				}
-			}
+	for (const envVar of Object.values(PROVIDER_ENV_KEYS)) {
+		if (process.env[envVar]) {
+			sandboxEnv[envVar] = process.env[envVar]!;
 		}
-	} catch {
-		// Ignore auth read errors
+	}
+	// Also pass through DB_* and other useful env vars
+	for (const key of ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "MOM_ADMIN_USERS"]) {
+		if (process.env[key]) {
+			sandboxEnv[key] = process.env[key]!;
+		}
 	}
 
 	const executor = createExecutor(sandboxConfig, sandboxEnv);

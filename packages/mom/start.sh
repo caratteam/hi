@@ -39,12 +39,13 @@ LOG_FILE="$DATA_DIR/mom.log"
 # Docker 컨테이너 상태 확인 및 시작
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    # 마운트 경로 검증
-    CURRENT_MOUNT=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}')
-    if [ "$CURRENT_MOUNT" != "$DATA_DIR" ]; then
-      echo "WARNING: Container workspace mount mismatch!"
-      echo "  Current:   $CURRENT_MOUNT"
-      echo "  Requested: $DATA_DIR"
+    # 마운트 경로 검증 (/workspace + /pi-mono)
+    CURRENT_WORKSPACE=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}')
+    CURRENT_PIMONO=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/pi-mono"}}{{.Source}}{{end}}{{end}}')
+    if [ "$CURRENT_WORKSPACE" != "$DATA_DIR" ] || [ "$CURRENT_PIMONO" != "$REPO_ROOT" ]; then
+      echo "WARNING: Container mount mismatch!"
+      echo "  /workspace  current: $CURRENT_WORKSPACE  requested: $DATA_DIR"
+      echo "  /pi-mono    current: $CURRENT_PIMONO  requested: $REPO_ROOT"
       echo "Recreating container..."
       "$SCRIPT_DIR/docker.sh" remove
       "$SCRIPT_DIR/docker.sh" create "$DATA_DIR"

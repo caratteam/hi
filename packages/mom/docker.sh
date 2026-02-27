@@ -12,6 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLIENT_ROOT="$(cd "$REPO_ROOT/../carat-client" && pwd)"
+ADMIN_ROOT="$(cd "$REPO_ROOT/../admin" && pwd)"
 
 CONTAINER_NAME="mom-sandbox"
 IMAGE="alpine:latest"
@@ -34,6 +35,7 @@ case "$1" in
     echo "Creating container '${CONTAINER_NAME}'..."
     echo "  Data dir: ${DATA_DIR} -> /workspace"
     echo "  Client dir: ${CLIENT_ROOT} -> /carat-client"
+    echo "  Admin dir: ${ADMIN_ROOT} -> /carat-admin"
     
     # Build env-file for Docker (convert export statements to KEY=VALUE)
     ENV_FILE="$HOME/.mom-env"
@@ -50,6 +52,7 @@ case "$1" in
       -v "${DATA_DIR}:/workspace" \
       -v "${REPO_ROOT}:/pi-mono" \
       -v "${CLIENT_ROOT}:/carat-client" \
+      -v "${ADMIN_ROOT}:/carat-admin" \
       "$IMAGE" \
       tail -f /dev/null
     

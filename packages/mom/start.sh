@@ -14,6 +14,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLIENT_ROOT="$(cd "$REPO_ROOT/../carat-client" && pwd)"
+ADMIN_ROOT="$(cd "$REPO_ROOT/../admin" && pwd)"
 CONTAINER_NAME="mom-sandbox"
 
 # 데이터 디렉토리 설정 (기본값: ~/.mom-data)
@@ -46,11 +47,13 @@ if [ "$CONTAINER_EXISTS" = "yes" ]; then
   CURRENT_WORKSPACE=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}')
   CURRENT_PIMONO=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/pi-mono"}}{{.Source}}{{end}}{{end}}')
   CURRENT_CLIENT=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/carat-client"}}{{.Source}}{{end}}{{end}}')
-  if [ "$CURRENT_WORKSPACE" != "$DATA_DIR" ] || [ "$CURRENT_PIMONO" != "$REPO_ROOT" ] || [ "$CURRENT_CLIENT" != "$CLIENT_ROOT" ]; then
+  CURRENT_ADMIN=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/carat-admin"}}{{.Source}}{{end}}{{end}}')
+  if [ "$CURRENT_WORKSPACE" != "$DATA_DIR" ] || [ "$CURRENT_PIMONO" != "$REPO_ROOT" ] || [ "$CURRENT_CLIENT" != "$CLIENT_ROOT" ] || [ "$CURRENT_ADMIN" != "$ADMIN_ROOT" ]; then
     echo "WARNING: Container mount mismatch!"
     echo "  /workspace     current: $CURRENT_WORKSPACE  requested: $DATA_DIR"
     echo "  /pi-mono       current: $CURRENT_PIMONO  requested: $REPO_ROOT"
     echo "  /carat-client  current: $CURRENT_CLIENT  requested: $CLIENT_ROOT"
+    echo "  /carat-admin   current: $CURRENT_ADMIN  requested: $ADMIN_ROOT"
     echo "Recreating container..."
     "$SCRIPT_DIR/docker.sh" remove
     "$SCRIPT_DIR/docker.sh" create "$DATA_DIR"
@@ -70,8 +73,10 @@ fi
 echo "Setting up container permissions..."
 docker exec "$CONTAINER_NAME" chown -R "$(id -u):$(id -g)" /pi-mono 2>/dev/null || true
 docker exec "$CONTAINER_NAME" chown -R "$(id -u):$(id -g)" /carat-client 2>/dev/null || true
+docker exec "$CONTAINER_NAME" chown -R "$(id -u):$(id -g)" /carat-admin 2>/dev/null || true
 docker exec "$CONTAINER_NAME" git config --global --add safe.directory /pi-mono 2>/dev/null || true
 docker exec "$CONTAINER_NAME" git config --global --add safe.directory /carat-client 2>/dev/null || true
+docker exec "$CONTAINER_NAME" git config --global --add safe.directory /carat-admin 2>/dev/null || true
 
 # Mom 백그라운드 실행
 echo "Starting Mom with data directory: $DATA_DIR"

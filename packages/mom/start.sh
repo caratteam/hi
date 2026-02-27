@@ -63,6 +63,13 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   fi
 fi
 
+# 컨테이너 내부 소유권 및 git safe.directory 설정
+echo "Setting up container permissions..."
+docker exec "$CONTAINER_NAME" chown -R "$(id -u):$(id -g)" /pi-mono 2>/dev/null || true
+docker exec "$CONTAINER_NAME" chown -R "$(id -u):$(id -g)" /carat-client 2>/dev/null || true
+docker exec "$CONTAINER_NAME" git config --global --add safe.directory /pi-mono 2>/dev/null || true
+docker exec "$CONTAINER_NAME" git config --global --add safe.directory /carat-client 2>/dev/null || true
+
 # Mom 백그라운드 실행
 echo "Starting Mom with data directory: $DATA_DIR"
 echo "─────────────────────────────────────────────────────────"

@@ -157,12 +157,6 @@ export class SlackBot {
 	private getApiKey?: () => Promise<string>;
 	private callHaikuOverride?: (prompt: string, fallback: string) => Promise<string>;
 
-	/**
-	 * Max number of non-bot messages after bot's last reply before disengaging.
-	 * If more than this many messages pass without bot involvement, stop auto-responding.
-	 */
-	private static readonly CONVERSATION_MAX_GAP = 5;
-
 	/** Admin user IDs that are allowed to trigger bot responses. Others are logged but ignored. */
 	private static readonly ADMIN_USER_SET = new Set(getAdminUsers());
 
@@ -304,104 +298,6 @@ export class SlackBot {
 			opts.thread_ts = threadTs;
 		}
 		await this.webClient.files.uploadV2(opts as any);
-	}
-
-	/**
-	 * Use Haiku to determine if a message is directed at the bot in an ongoing conversation.
-	 * Looks at recent conversation context to decide.
-	 */
-	private async isMessageDirectedAtBot(
-		messageText: string,
-		userName: string,
-		channel: string,
-		threadTs?: string,
-	): Promise<boolean> {
-		// Get recent conversation context from log.jsonl, filtered by thread
-		let context = "";
-		try {
-			const logPath = join(this.workingDir, channel, "log.jsonl");
-			if (existsSync(logPath)) {
-				const content = readFileSync(logPath, "utf-8");
-				const lines = content.trim().split("\n").slice(-30);
-				const msgs: string[] = [];
-				for (const line of lines) {
-					try {
-						const entry = JSON.parse(line);
-						// Filter by thread context (including parent message whose ts == threadTs)
-						const entryThread = entry.thread_ts;
-						const entryTs = entry.ts;
-						if (threadTs) {
-							if (entryThread !== threadTs && entryTs !== threadTs) continue;
-						} else {
-							if (entryThread) continue;
-						}
-
-						const who = entry.isBot ? "Mom(bot)" : entry.userName || entry.user || "unknown";
-						const text = (entry.text || "").substring(0, 200);
-						msgs.push(`${who}: ${text}`);
-					} catch {}
-				}
-				// Take last 10 relevant messages
-				context = msgs.slice(-10).join("\n");
-			}
-		} catch {
-			/* ignore */
-		}
-
-		return isMessageForBot(messageText, userName, context, this.getApiKey, this.callHaikuOverride);
-	}
-
-	/**
-	 * Check if Mom is in an active conversation in this channel/thread.
-	 * Looks at log.jsonl to count non-bot messages since Mom's last reply.
-	 * Filters by thread_ts to avoid cross-thread interference.
-	 * Returns the number of messages since last bot reply, or -1 if not in conversation.
-	 */
-	private getMessagesSinceLastReply(channel: string, threadTs?: string): number {
-		try {
-			const logPath = join(this.workingDir, channel, "log.jsonl");
-			if (!existsSync(logPath)) return -1;
-
-			const content = readFileSync(logPath, "utf-8");
-			const lines = content.trim().split("\n");
-			const recentLines = lines.slice(-30);
-
-			// Filter to same conversation context (same thread or top-level)
-			// A message belongs to a thread if:
-			//   - its thread_ts matches, OR
-			//   - its ts equals threadTs (it's the parent message of the thread)
-			const relevantEntries: Array<{ isBot: boolean }> = [];
-			for (const line of recentLines) {
-				try {
-					const entry = JSON.parse(line);
-					const entryThread = entry.thread_ts;
-					const entryTs = entry.ts;
-					if (threadTs) {
-						// Looking for messages in a specific thread
-						if (entryThread === threadTs || entryTs === threadTs) {
-							relevantEntries.push(entry);
-						}
-					} else {
-						// Looking for top-level messages only
-						if (!entryThread) {
-							relevantEntries.push(entry);
-						}
-					}
-				} catch {}
-			}
-
-			let messagesSinceBot = 0;
-			for (let i = relevantEntries.length - 1; i >= 0; i--) {
-				if (relevantEntries[i].isBot) {
-					return messagesSinceBot;
-				}
-				messagesSinceBot++;
-			}
-
-			return -1; // No bot message found in this context
-		} catch {
-			return -1;
-		}
 	}
 
 	/**
@@ -639,25 +535,9 @@ export class SlackBot {
 			}
 
 			// Determine if we should handle this message
-			// Only respond to admin users (others are still logged above)
-			let shouldHandle = isDM && SlackBot.ADMIN_USER_SET.has(e.user);
-
-			if (!isDM && !isBotMention && SlackBot.ADMIN_USER_SET.has(e.user)) {
-				const msgGap = this.getMessagesSinceLastReply(e.channel, e.thread_ts);
-				if (msgGap >= 0 && msgGap <= SlackBot.CONVERSATION_MAX_GAP) {
-					// Mom recently participated in this thread/channel. Ask Haiku if this message is directed at Mom.
-					const userName = this.users.get(e.user)?.userName || e.user;
-					const directed = await this.isMessageDirectedAtBot(e.text || "", userName, e.channel, e.thread_ts);
-					if (directed) {
-						shouldHandle = true;
-						log.logInfo(
-							`[${e.channel}] Implicit conversation with ${userName} (${msgGap} msgs since last reply, Haiku: directed)`,
-						);
-					} else {
-						log.logInfo(`[${e.channel}] Skipping implicit - Haiku says not directed (${msgGap} msgs gap)`);
-					}
-				}
-			}
+			// DMs: always respond to admin users
+			// Channels: only respond to @mentions (handled by app_mention event, not here)
+			const shouldHandle = isDM && SlackBot.ADMIN_USER_SET.has(e.user);
 
 			if (shouldHandle) {
 				const queued = this.handler.isRunning(e.channel);
@@ -1104,36 +984,4 @@ If the emoji is too ambiguous or meaningless to interpret, reply with exactly "i
 	const haikuFn = callHaikuOverride || ((p: string, f: string) => callHaiku(p, f, getApiKey));
 	const result = await haikuFn(prompt, "ignore");
 	return result.toLowerCase() === "ignore" ? "ignore" : result;
-}
-
-/**
- * Determine if a channel message (without @mention) is directed at the bot,
- * given recent conversation context.
- */
-async function isMessageForBot(
-	messageText: string,
-	userName: string,
-	recentContext: string,
-	getApiKey?: () => Promise<string>,
-	callHaikuOverride?: (prompt: string, fallback: string) => Promise<string>,
-): Promise<boolean> {
-	const prompt = `You are "나노캐럿(Mom)", an AI assistant in a Slack channel. You recently participated in a conversation.
-
-Recent conversation:
-${recentContext}
-
-New message from ${userName}: "${messageText}"
-
-Is this new message directed at you (the AI assistant)? Consider:
-- If your last message invited a response (e.g. "물어보세요", "알려주세요", "해볼까요?", "도와드릴까요?"), the next message from the same user is almost certainly directed at you.
-- Is the user continuing a conversation with you?
-- Is the user asking you to do something, requesting information, or responding to something you said?
-- Does the message contain a command, question, or request that an AI assistant would handle (e.g. DB queries, file operations, code changes, content generation)?
-- Or is this clearly general chatter between humans that has nothing to do with you?
-
-When in doubt, answer "yes". Reply with exactly "yes" or "no".`;
-
-	const haikuFn = callHaikuOverride || ((p: string, f: string) => callHaiku(p, f, getApiKey));
-	const result = await haikuFn(prompt, "no");
-	return result.toLowerCase().startsWith("yes");
 }

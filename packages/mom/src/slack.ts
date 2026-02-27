@@ -160,6 +160,13 @@ export class SlackBot {
 	/** Admin user IDs that are allowed to trigger bot responses. Others are logged but ignored. */
 	private static readonly ADMIN_USER_SET = new Set(getAdminUsers());
 
+	/**
+	 * Mention watch for admin users: when someone mentions an admin user in a channel,
+	 * send an alert to their DM channel so the bot can draft a response.
+	 * Populated automatically from ADMIN_USER_SET + IM channel data.
+	 */
+	private userDmMap = new Map<string, string>(); // userId -> dmChannelId
+
 	constructor(
 		handler: MomHandler,
 		config: {
@@ -547,6 +554,42 @@ export class SlackBot {
 					await this.handler.handleEvent(slackEvent, this);
 				});
 			}
+
+			// Mention watch: detect when someone mentions an admin user in a channel
+			if (!isDM && this.userDmMap.size > 0 && e.text) {
+				for (const [watchedUserId, dmChannelId] of this.userDmMap) {
+					if (e.text.includes(`<@${watchedUserId}>`) && e.user !== watchedUserId) {
+						const sender = this.users.get(e.user);
+						const channel = this.channels.get(e.channel);
+						const senderName = sender?.displayName || sender?.userName || e.user;
+						const channelName = channel?.name || e.channel;
+
+						// Build Slack message permalink
+						const tsForLink = e.ts.replace(".", "");
+						const threadParam = e.thread_ts ? `&thread_ts=${e.thread_ts}&cid=${e.channel}` : "";
+						const permalink = `https://carat-team.slack.com/archives/${e.channel}/p${tsForLink}${threadParam}`;
+
+						const alertText =
+							`[MENTION-ALERT] #${channelName}에서 ${senderName}님이 멘션했습니다.\n` +
+							`링크: ${permalink}\n` +
+							`원문: ${e.text}`;
+
+						log.logInfo(
+							`[mention-watch] Detected mention of ${watchedUserId} in #${channelName} by ${senderName}`,
+						);
+
+						// Enqueue as synthetic event to the admin user's DM channel
+						const syntheticEvent: SlackEvent = {
+							type: "dm",
+							channel: dmChannelId,
+							user: "EVENT",
+							text: alertText,
+							ts: Date.now().toString(),
+						};
+						this.enqueueEvent(syntheticEvent);
+					}
+				}
+			}
 		});
 	}
 
@@ -756,6 +799,11 @@ export class SlackBot {
 						const user = im.user ? this.users.get(im.user) : undefined;
 						const name = user ? `DM:${user.userName}` : `DM:${im.id}`;
 						this.channels.set(im.id, { id: im.id, name });
+
+						// Track DM channel for admin users (for mention watch)
+						if (im.user && SlackBot.ADMIN_USER_SET.has(im.user)) {
+							this.userDmMap.set(im.user, im.id);
+						}
 					}
 				}
 			}

@@ -43,6 +43,16 @@ CONTAINER_EXISTS=$(docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NA
 CONTAINER_RUNNING=$(docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" && echo "yes" || echo "no")
 
 if [ "$CONTAINER_EXISTS" = "yes" ]; then
+  # 이미지 검증 — docker.sh에 정의된 이미지와 현재 컨테이너 이미지 비교
+  EXPECTED_IMAGE=$(grep '^IMAGE=' "$SCRIPT_DIR/docker.sh" | head -1 | sed 's/IMAGE="//' | sed 's/"//')
+  CURRENT_IMAGE=$(docker inspect "$CONTAINER_NAME" --format '{{.Config.Image}}')
+  if [ -n "$EXPECTED_IMAGE" ] && [ "$CURRENT_IMAGE" != "$EXPECTED_IMAGE" ]; then
+    echo "WARNING: Container image mismatch!"
+    echo "  current: $CURRENT_IMAGE  expected: $EXPECTED_IMAGE"
+    echo "Recreating container..."
+    "$SCRIPT_DIR/docker.sh" remove
+    "$SCRIPT_DIR/docker.sh" create "$DATA_DIR"
+  else
   # 마운트 경로 검증 (/workspace + /pi-mono + /carat-client) — running 여부 관계없이 항상 검증
   CURRENT_WORKSPACE=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}')
   CURRENT_PIMONO=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/pi-mono"}}{{.Source}}{{end}}{{end}}')
@@ -62,6 +72,7 @@ if [ "$CONTAINER_EXISTS" = "yes" ]; then
     docker start "$CONTAINER_NAME" > /dev/null
   else
     echo "Container already running with correct mounts."
+  fi
   fi
 else
   echo "Creating new container..."

@@ -1227,6 +1227,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					contextTokens,
 					contextWindow,
 					actualModel.id,
+					join(channelDir, "..", "daily-usage.json"),
 				);
 				if (ctx.message.channel === USAGE_SUMMARY_CHANNEL) {
 					// Already in hansol DM - post in thread as before

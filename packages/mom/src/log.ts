@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import chalk from "chalk";
 
 export interface LogContext {
@@ -185,6 +187,45 @@ export function logAgentError(ctx: LogContext | "system", error: string): void {
 	console.log(chalk.dim(indented));
 }
 
+// Daily usage tracking
+interface DailyUsage {
+	date: string; // YYYY/M/D in KST
+	totalCost: number;
+}
+
+function getKSTDateString(): string {
+	const now = new Date();
+	const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+	return `${kst.getUTCFullYear()}/${kst.getUTCMonth() + 1}/${kst.getUTCDate()}`;
+}
+
+function updateDailyUsage(filePath: string, cost: number): DailyUsage {
+	const today = getKSTDateString();
+	let data: DailyUsage = { date: today, totalCost: 0 };
+
+	try {
+		const content = readFileSync(filePath, "utf-8");
+		const parsed = JSON.parse(content) as DailyUsage;
+		if (parsed.date === today) {
+			data = parsed;
+		}
+	} catch {
+		// File doesn't exist or is invalid - start fresh
+	}
+
+	data.date = today;
+	data.totalCost += cost;
+
+	try {
+		mkdirSync(dirname(filePath), { recursive: true });
+		writeFileSync(filePath, JSON.stringify(data), "utf-8");
+	} catch {
+		// Best effort - don't break usage summary if write fails
+	}
+
+	return data;
+}
+
 // Usage summary
 export function logUsageSummary(
 	ctx: LogContext,
@@ -198,6 +239,7 @@ export function logUsageSummary(
 	contextTokens?: number,
 	contextWindow?: number,
 	modelName?: string,
+	dailyUsageFile?: string,
 ): string {
 	const formatTokens = (count: number): string => {
 		if (count < 1000) return count.toString();
@@ -226,6 +268,12 @@ export function logUsageSummary(
 				: ""),
 	);
 	lines.push(`*Total: $${usage.cost.total.toFixed(4)}*`);
+
+	// Daily cumulative cost
+	if (dailyUsageFile) {
+		const daily = updateDailyUsage(dailyUsageFile, usage.cost.total);
+		lines.push(`_${daily.date} 누적: $${daily.totalCost.toFixed(4)}_`);
+	}
 
 	const summary = lines.join("\n");
 

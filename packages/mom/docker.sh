@@ -15,7 +15,7 @@ CLIENT_ROOT="$(cd "$REPO_ROOT/../carat-client" && pwd)"
 ADMIN_ROOT="$(cd "$REPO_ROOT/../admin" && pwd)"
 
 CONTAINER_NAME="mom-sandbox"
-IMAGE="alpine:latest"
+IMAGE="node:22-slim"
 
 case "$1" in
   create)

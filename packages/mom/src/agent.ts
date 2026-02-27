@@ -204,9 +204,9 @@ function buildSystemPrompt(
 		users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
 
 	const envDescription = isDocker
-		? `You are running inside a Docker container (Alpine Linux).
+		? `You are running inside a Docker container (Debian Linux).
 - Bash working directory: / (use cd or absolute paths)
-- Install tools with: apk add <package>
+- Install tools with: apt-get update && apt-get install -y <package>
 - Your changes persist across sessions`
 		: `You are running directly on the host machine.
 - Bash working directory: ${process.cwd()}
@@ -339,7 +339,7 @@ ${memory}
 
 ## System Configuration Log
 Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
-- Installed packages (apk add, npm install, pip install)
+- Installed packages (apt-get install, npm install, pip install)
 - Environment variables set
 - Config files modified (~/.gitconfig, cron jobs, etc.)
 - Skill dependencies installed
@@ -349,7 +349,7 @@ Update this file whenever you modify the environment. On fresh container, read i
 ## Log Queries (for older history)
 Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","isBot":false}\`
 The log contains user messages and your final responses (not tool calls/results).
-${isDocker ? "Install jq: apk add jq" : ""}
+${isDocker ? "Install jq: apt-get update && apt-get install -y jq" : ""}
 
 \`\`\`bash
 # Recent messages

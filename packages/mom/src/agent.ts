@@ -1203,7 +1203,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				}
 			}
 
-			// Log usage summary with context info
+			// Log usage summary - always send to hansol DM
+			const USAGE_SUMMARY_CHANNEL = "D0AHEJW16S0";
 			if (runState.totalUsage.cost.total > 0) {
 				// Get last non-aborted assistant message for context calculation
 				const messages = session.messages;
@@ -1227,7 +1228,15 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					contextWindow,
 					actualModel.id,
 				);
-				runState.queue.enqueue(() => ctx.respondInThread(summary, true), "usage summary");
+				if (ctx.message.channel === USAGE_SUMMARY_CHANNEL) {
+					// Already in hansol DM - post in thread as before
+					runState.queue.enqueue(() => ctx.respondInThread(summary, true), "usage summary");
+				} else {
+					// Other channel - send to hansol DM instead
+					runState.queue.enqueue(async () => {
+						await ctx.postToChannel(USAGE_SUMMARY_CHANNEL, summary);
+					}, "usage summary to DM");
+				}
 				await queueChain;
 			}
 

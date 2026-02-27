@@ -82,6 +82,7 @@ export interface SlackContext {
 	uploadFile: (filePath: string, title?: string) => Promise<void>;
 	setWorking: (working: boolean) => Promise<void>;
 	deleteMessage: () => Promise<void>;
+	postToChannel: (channelId: string, text: string, threadTs?: string) => Promise<string>;
 }
 
 export interface MomHandler {

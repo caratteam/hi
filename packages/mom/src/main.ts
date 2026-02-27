@@ -346,6 +346,13 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			await updatePromise;
 			if (lastError) throw lastError;
 		},
+
+		postToChannel: async (channelId: string, text: string, threadTs?: string) => {
+			if (threadTs) {
+				return await slack.postInThread(channelId, threadTs, text);
+			}
+			return await slack.postMessage(channelId, text);
+		},
 	};
 }
 

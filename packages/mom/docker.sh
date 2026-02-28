@@ -71,6 +71,14 @@ case "$1" in
     
     if [ $? -eq 0 ]; then
       echo "Container created and running."
+      
+      # Run setup script if it exists in the workspace
+      SETUP_SCRIPT="${DATA_DIR}/setup.sh"
+      if [ -f "$SETUP_SCRIPT" ]; then
+        echo "Running setup script..."
+        docker exec "$CONTAINER_NAME" bash /workspace/setup.sh
+      fi
+      
       echo ""
       echo "Run mom with: mom --sandbox=docker:${CONTAINER_NAME} $2"
     else

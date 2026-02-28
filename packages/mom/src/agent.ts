@@ -339,14 +339,10 @@ Update when you learn something important or when asked to remember something.
 ### Current Memory
 ${memory}
 
-## System Configuration Log
-Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
-- Installed packages (apt-get install, npm install, pip install)
-- Environment variables set
-- Config files modified (~/.gitconfig, cron jobs, etc.)
-- Skill dependencies installed
-
-Update this file whenever you modify the environment. On fresh container, read it first to restore your setup.
+## Environment Setup
+${workspacePath}/setup.sh runs automatically on container creation (via docker.sh).
+When you install packages, change config, or modify the environment, add the command to setup.sh so it persists across container rebuilds.
+Do NOT maintain a separate SYSTEM.md - setup.sh is the single source of truth.
 
 ## Log Queries (for older history)
 Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","isBot":false}\`

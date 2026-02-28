@@ -114,47 +114,25 @@ function getImageMimeType(filename: string): string | undefined {
 }
 
 function getMemory(channelDir: string): string {
-	const parts: string[] = [];
-
-	// Read workspace-level memory (shared across all channels)
+	// Workspace-level memory only (no channel-specific memory)
 	const workspaceMemoryPath = join(channelDir, "..", "MEMORY.md");
 	if (existsSync(workspaceMemoryPath)) {
 		try {
 			const content = readFileSync(workspaceMemoryPath, "utf-8").trim();
 			if (content) {
-				parts.push(`### Global Workspace Memory\n${content}`);
+				return content;
 			}
 		} catch (error) {
 			log.logWarning("Failed to read workspace memory", `${workspaceMemoryPath}: ${error}`);
 		}
 	}
 
-	// Read channel-specific memory
-	const channelMemoryPath = join(channelDir, "MEMORY.md");
-	if (existsSync(channelMemoryPath)) {
-		try {
-			const content = readFileSync(channelMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Channel-Specific Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read channel memory", `${channelMemoryPath}: ${error}`);
-		}
-	}
-
-	if (parts.length === 0) {
-		return "(no working memory yet)";
-	}
-
-	return parts.join("\n\n");
+	return "(no working memory yet)";
 }
 
 function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
-	const skillMap = new Map<string, Skill>();
-
 	// channelDir is the host path (e.g., /Users/.../data/C0A34FL8PMH)
 	// hostWorkspacePath is the parent directory on host
-	// workspacePath is the container path (e.g., /workspace)
 	const hostWorkspacePath = join(channelDir, "..");
 
 	// Helper to translate host paths to container paths
@@ -165,24 +143,16 @@ function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
 		return hostPath;
 	};
 
-	// Load workspace-level skills (global)
+	// Load workspace-level skills only (no channel-specific skills)
 	const workspaceSkillsDir = join(hostWorkspacePath, "skills");
+	const skills: Skill[] = [];
 	for (const skill of loadSkillsFromDir({ dir: workspaceSkillsDir, source: "workspace" }).skills) {
-		// Translate paths to container paths for system prompt
 		skill.filePath = translatePath(skill.filePath);
 		skill.baseDir = translatePath(skill.baseDir);
-		skillMap.set(skill.name, skill);
+		skills.push(skill);
 	}
 
-	// Load channel-specific skills (override workspace skills on collision)
-	const channelSkillsDir = join(channelDir, "skills");
-	for (const skill of loadSkillsFromDir({ dir: channelSkillsDir, source: "channel" }).skills) {
-		skill.filePath = translatePath(skill.filePath);
-		skill.baseDir = translatePath(skill.baseDir);
-		skillMap.set(skill.name, skill);
-	}
-
-	return Array.from(skillMap.values());
+	return skills;
 }
 
 function buildSystemPrompt(
@@ -194,7 +164,6 @@ function buildSystemPrompt(
 	users: UserInfo[],
 	skills: Skill[],
 ): string {
-	const channelPath = `${workspacePath}/${channelId}`;
 	const isDocker = sandboxConfig.type === "docker";
 
 	// Format channel mappings
@@ -240,17 +209,15 @@ ${workspacePath}/
 ├── MEMORY.md                    # Global memory (all channels)
 ├── skills/                      # Global CLI tools you create
 └── ${channelId}/                # This channel
-    ├── MEMORY.md                # Channel-specific memory
     ├── log.jsonl                # Message history (no tool results)
     ├── attachments/             # User-shared files
-    ├── scratch/                 # Your working directory
-    └── skills/                  # Channel-specific tools
+    └── scratch/                 # Your working directory
 
 ## Skills (Custom CLI Tools)
 You can create reusable CLI tools for recurring tasks (email, APIs, data processing, etc.).
 
 ### Creating Skills
-Store in \`${workspacePath}/skills/<name>/\` (global) or \`${channelPath}/skills/<name>/\` (channel-specific).
+Store in \`${workspacePath}/skills/<name>/\`.
 Each skill directory needs a \`SKILL.md\` with YAML frontmatter:
 
 \`\`\`markdown
@@ -327,13 +294,8 @@ For periodic events where there's nothing to report, respond with just \`[SILENT
 ### Debouncing
 When writing programs that create immediate events (email watchers, webhook handlers, etc.), always debounce. If 50 emails arrive in a minute, don't create 50 immediate events. Instead collect events over a window and create ONE immediate event summarizing what happened, or just signal "new activity, check inbox" rather than per-item events. Or simpler: use a periodic event to check for new items every N minutes instead of immediate events.
 
-### Limits
-Maximum 5 events can be queued. Don't create excessive immediate or periodic events.
-
 ## Memory
-Write to MEMORY.md files to persist context across conversations.
-- Global (${workspacePath}/MEMORY.md): skills, preferences, project info
-- Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
+Write to ${workspacePath}/MEMORY.md to persist context across conversations (skills, preferences, project info, ongoing work).
 Update when you learn something important or when asked to remember something.
 
 ### Current Memory
@@ -642,17 +604,19 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	sharedAuthStorage = authStorage;
 	const modelRegistry = new ModelRegistry(authStorage);
 
-	// Create agent
-	const agent = new Agent({
-		initialState: {
-			systemPrompt,
-			model,
-			thinkingLevel: "off",
-			tools,
-		},
-		convertToLlm,
-		getApiKey: async (provider?: string) => getProviderApiKey(authStorage, provider || model.provider),
-	});
+	/** Create a new Agent instance (one per thread) */
+	function createAgent(initialSystemPrompt: string): Agent {
+		return new Agent({
+			initialState: {
+				systemPrompt: initialSystemPrompt,
+				model,
+				thinkingLevel: "off",
+				tools,
+			},
+			convertToLlm,
+			getApiKey: async (provider?: string) => getProviderApiKey(authStorage, provider || model.provider),
+		});
+	}
 
 	const resourceLoader: ResourceLoader = {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
@@ -669,20 +633,58 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
-	// Per-thread session cache: threadTs -> { sessionManager, session }
-	const threadSessions = new Map<string, { sessionManager: SessionManager; session: AgentSession }>();
+	/** TTL for idle thread sessions: 30 minutes */
+	const THREAD_SESSION_TTL_MS = 30 * 60 * 1000;
+
+	// Per-thread session cache: threadTs -> { agent, sessionManager, session, lastAccessTime }
+	const threadSessions = new Map<
+		string,
+		{ agent: Agent; sessionManager: SessionManager; session: AgentSession; lastAccessTime: number }
+	>();
+
+	/** Evict thread sessions that have been idle longer than TTL */
+	function evictStaleSessions(): void {
+		const now = Date.now();
+		const staleKeys: string[] = [];
+		for (const [threadTs, entry] of threadSessions) {
+			if (now - entry.lastAccessTime > THREAD_SESSION_TTL_MS) {
+				// Don't evict if the session is currently streaming
+				if (!entry.agent.state.isStreaming) {
+					staleKeys.push(threadTs);
+				}
+			}
+		}
+		for (const key of staleKeys) {
+			threadSessions.delete(key);
+			log.logInfo(`[${channelId}] Evicted stale thread session: ${key}`);
+		}
+	}
 
 	/** Get or create a session for a specific thread */
-	function getThreadSession(threadTs: string): { sessionManager: SessionManager; session: AgentSession } {
+	function getThreadSession(threadTs: string): {
+		agent: Agent;
+		sessionManager: SessionManager;
+		session: AgentSession;
+		lastAccessTime: number;
+	} {
 		const existing = threadSessions.get(threadTs);
-		if (existing) return existing;
+		if (existing) {
+			existing.lastAccessTime = Date.now();
+			return existing;
+		}
+
+		// Evict stale sessions before creating a new one
+		evictStaleSessions();
 
 		const contextFile = getContextFilePath(channelDir, threadTs);
 		const sessionManager = SessionManager.open(contextFile, channelDir);
 		patchSessionManagerPersist(sessionManager);
 
+		// Each thread gets its own Agent instance for concurrent execution
+		const threadAgent = createAgent(systemPrompt);
+
 		const session = new AgentSession({
-			agent,
+			agent: threadAgent,
 			sessionManager,
 			settingsManager: settingsManager as any,
 			cwd: process.cwd(),
@@ -691,19 +693,16 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			baseToolsOverride,
 		});
 
-		// Subscribe to events for this session (same handler for all threads)
-		// Guard: only handle events if THIS session is the currently active one.
-		// Since all sessions share the same Agent, the Agent's event listeners
-		// fire for ALL sessions, causing duplicate handling without this check.
+		// Subscribe to events for this session
 		session.subscribe(async (event: AgentSessionEvent) => {
 			if (!runState.ctx || !runState.logCtx || !runState.queue) return;
 			if (runState.currentSession !== session) return;
 			handleSessionEvent(event, runState);
 		});
 
-		const entry = { sessionManager, session };
+		const entry = { agent: threadAgent, sessionManager, session, lastAccessTime: Date.now() };
 		threadSessions.set(threadTs, entry);
-		log.logInfo(`[${channelId}] Created new thread session: ${threadTs}`);
+		log.logInfo(`[${channelId}] Created new thread session: ${threadTs} (total: ${threadSessions.size})`);
 		return entry;
 	}
 
@@ -900,8 +899,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			// - If top-level mention: use the message ts (will become thread parent)
 			const threadTs = ctx.message.thread_ts || ctx.message.ts;
 
-			// Get or create thread-specific session
-			const { sessionManager, session } = getThreadSession(threadTs);
+			// Get or create thread-specific session (each with its own Agent)
+			const threadEntry = getThreadSession(threadTs);
+			const { agent: threadAgent, sessionManager, session } = threadEntry;
 
 			// Store current session for abort()
 			runState.currentSession = session;
@@ -978,13 +978,13 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				// Add trimmed context messages
 				finalMessages.push(...trimmedMessages);
 
-				agent.replaceMessages(finalMessages);
+				threadAgent.replaceMessages(finalMessages);
 				log.logInfo(
 					`[${channelId}:${threadTs}] Loaded ${finalMessages.length} messages (${logMessages.length} from log + ${trimmedMessages.length} from context)`,
 				);
 			} else {
-				// New thread - clear any messages from previous thread
-				agent.replaceMessages([]);
+				// New thread - start fresh
+				threadAgent.replaceMessages([]);
 			}
 
 			// Update system prompt with fresh memory, channel/user info, and skills
@@ -999,7 +999,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				ctx.users,
 				skills,
 			);
-			session.agent.setSystemPrompt(systemPrompt);
+			threadAgent.setSystemPrompt(systemPrompt);
 
 			// Dynamic model override from settings.json
 			let actualModel = model; // Start with default
@@ -1008,7 +1008,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			if (savedProvider && savedModelId) {
 				const dynamicModel = getModel(savedProvider as any, savedModelId as any);
 				if (dynamicModel) {
-					session.agent.setModel(dynamicModel);
+					threadAgent.setModel(dynamicModel);
 					actualModel = dynamicModel; // Track actual model used
 				}
 			}
@@ -1142,7 +1142,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 					const messages = session.messages;
 					const keepCount = Math.max(2, Math.floor(messages.length / 2));
 					const trimmed = sanitizeToolPairs(messages.slice(messages.length - keepCount), log, channelId, threadTs);
-					session.agent.replaceMessages(trimmed);
+					threadAgent.replaceMessages(trimmed);
 					log.logInfo(
 						`[${channelId}] Context too long, trimmed to ${trimmed.length} messages (retry ${retries}/${maxRetries})`,
 					);

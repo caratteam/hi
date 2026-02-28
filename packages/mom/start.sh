@@ -58,12 +58,28 @@ if [ "$CONTAINER_EXISTS" = "yes" ]; then
   CURRENT_PIMONO=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/pi-mono"}}{{.Source}}{{end}}{{end}}')
   CURRENT_CLIENT=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/carat-client"}}{{.Source}}{{end}}{{end}}')
   CURRENT_ADMIN=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/carat-admin"}}{{.Source}}{{end}}{{end}}')
+  CURRENT_AUTH=$(docker inspect "$CONTAINER_NAME" --format '{{range .Mounts}}{{if eq .Destination "/root/.pi/mom"}}{{.Source}}{{end}}{{end}}')
+  # auth.json이 호스트에 존재하면 마운트되어야 함
+  AUTH_JSON="$HOME/.pi/mom/auth.json"
+  EXPECTED_AUTH_DIR=""
+  if [ -f "$AUTH_JSON" ]; then
+    EXPECTED_AUTH_DIR="$(cd "$(dirname "$AUTH_JSON")" && pwd)"
+  fi
+  MOUNT_MISMATCH="no"
   if [ "$CURRENT_WORKSPACE" != "$DATA_DIR" ] || [ "$CURRENT_PIMONO" != "$REPO_ROOT" ] || [ "$CURRENT_CLIENT" != "$CLIENT_ROOT" ] || [ "$CURRENT_ADMIN" != "$ADMIN_ROOT" ]; then
+    MOUNT_MISMATCH="yes"
+  fi
+  # auth.json이 호스트에 있는데 마운트 안 되어 있거나, 경로가 다르면 mismatch
+  if [ -n "$EXPECTED_AUTH_DIR" ] && [ "$CURRENT_AUTH" != "$EXPECTED_AUTH_DIR" ]; then
+    MOUNT_MISMATCH="yes"
+  fi
+  if [ "$MOUNT_MISMATCH" = "yes" ]; then
     echo "WARNING: Container mount mismatch!"
     echo "  /workspace     current: $CURRENT_WORKSPACE  requested: $DATA_DIR"
     echo "  /pi-mono       current: $CURRENT_PIMONO  requested: $REPO_ROOT"
     echo "  /carat-client  current: $CURRENT_CLIENT  requested: $CLIENT_ROOT"
     echo "  /carat-admin   current: $CURRENT_ADMIN  requested: $ADMIN_ROOT"
+    echo "  /root/.pi/mom  current: $CURRENT_AUTH  requested: $EXPECTED_AUTH_DIR"
     echo "Recreating container..."
     "$SCRIPT_DIR/docker.sh" remove
     "$SCRIPT_DIR/docker.sh" create "$DATA_DIR"

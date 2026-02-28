@@ -393,19 +393,54 @@ function formatToolArgsForSlack(_toolName: string, args: Record<string, unknown>
 	return lines.join("\n");
 }
 
-// Cache runners per channel
-const channelRunners = new Map<string, AgentRunner>();
+// Cache runners per thread
+const threadRunners = new Map<string, AgentRunner>();
+
+/** TTL for idle thread runners: 30 minutes */
+const THREAD_RUNNER_TTL_MS = 30 * 60 * 1000;
+
+/** Track last access time per runner for eviction */
+const threadRunnerLastAccess = new Map<string, number>();
+
+/** Evict thread runners that have been idle longer than TTL */
+function evictStaleRunners(): void {
+	const now = Date.now();
+	const staleKeys: string[] = [];
+	for (const [key, lastAccess] of threadRunnerLastAccess) {
+		if (now - lastAccess > THREAD_RUNNER_TTL_MS) {
+			staleKeys.push(key);
+		}
+	}
+	for (const key of staleKeys) {
+		threadRunners.delete(key);
+		threadRunnerLastAccess.delete(key);
+		log.logInfo(`Evicted stale thread runner: ${key}`);
+	}
+}
 
 /**
- * Get or create an AgentRunner for a channel.
- * Runners are cached - one per channel, persistent across messages.
+ * Get or create an AgentRunner for a specific thread.
+ * Runners are cached - one per thread, persistent across messages in the same thread.
  */
-export function getOrCreateRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
-	const existing = channelRunners.get(channelId);
-	if (existing) return existing;
+export function getOrCreateRunner(
+	sandboxConfig: SandboxConfig,
+	channelId: string,
+	channelDir: string,
+	threadTs: string,
+): AgentRunner {
+	const key = `${channelId}:${threadTs}`;
+	const existing = threadRunners.get(key);
+	if (existing) {
+		threadRunnerLastAccess.set(key, Date.now());
+		return existing;
+	}
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir);
-	channelRunners.set(channelId, runner);
+	// Evict stale runners before creating a new one
+	evictStaleRunners();
+
+	const runner = createRunner(sandboxConfig, channelId, channelDir, threadTs);
+	threadRunners.set(key, runner);
+	threadRunnerLastAccess.set(key, Date.now());
 	return runner;
 }
 
@@ -552,7 +587,12 @@ function getContextFilePath(channelDir: string, threadTs?: string): string {
 	return join(channelDir, "context-main.jsonl");
 }
 
-function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
+function createRunner(
+	sandboxConfig: SandboxConfig,
+	channelId: string,
+	channelDir: string,
+	threadTs: string,
+): AgentRunner {
 	// Load API keys from process.env (set via .mom-env) to inject into sandbox environment
 	const sandboxEnv: Record<string, string> = {};
 	for (const envVar of Object.values(PROVIDER_ENV_KEYS)) {
@@ -633,80 +673,27 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
-	/** TTL for idle thread sessions: 30 minutes */
-	const THREAD_SESSION_TTL_MS = 30 * 60 * 1000;
+	// Single session for this thread runner (1 runner = 1 thread = 1 session)
+	const contextFile = getContextFilePath(channelDir, threadTs);
+	const sessionManager = SessionManager.open(contextFile, channelDir);
+	patchSessionManagerPersist(sessionManager);
 
-	// Per-thread session cache: threadTs -> { agent, sessionManager, session, lastAccessTime }
-	const threadSessions = new Map<
-		string,
-		{ agent: Agent; sessionManager: SessionManager; session: AgentSession; lastAccessTime: number }
-	>();
+	const threadAgent = createAgent(systemPrompt);
 
-	/** Evict thread sessions that have been idle longer than TTL */
-	function evictStaleSessions(): void {
-		const now = Date.now();
-		const staleKeys: string[] = [];
-		for (const [threadTs, entry] of threadSessions) {
-			if (now - entry.lastAccessTime > THREAD_SESSION_TTL_MS) {
-				// Don't evict if the session is currently streaming
-				if (!entry.agent.state.isStreaming) {
-					staleKeys.push(threadTs);
-				}
-			}
-		}
-		for (const key of staleKeys) {
-			threadSessions.delete(key);
-			log.logInfo(`[${channelId}] Evicted stale thread session: ${key}`);
-		}
-	}
+	const session = new AgentSession({
+		agent: threadAgent,
+		sessionManager,
+		settingsManager: settingsManager as any,
+		cwd: process.cwd(),
+		modelRegistry,
+		resourceLoader,
+		baseToolsOverride,
+	});
 
-	/** Get or create a session for a specific thread */
-	function getThreadSession(threadTs: string): {
-		agent: Agent;
-		sessionManager: SessionManager;
-		session: AgentSession;
-		lastAccessTime: number;
-	} {
-		const existing = threadSessions.get(threadTs);
-		if (existing) {
-			existing.lastAccessTime = Date.now();
-			return existing;
-		}
-
-		// Evict stale sessions before creating a new one
-		evictStaleSessions();
-
-		const contextFile = getContextFilePath(channelDir, threadTs);
-		const sessionManager = SessionManager.open(contextFile, channelDir);
-		patchSessionManagerPersist(sessionManager);
-
-		// Each thread gets its own Agent instance for concurrent execution
-		const threadAgent = createAgent(systemPrompt);
-
-		const session = new AgentSession({
-			agent: threadAgent,
-			sessionManager,
-			settingsManager: settingsManager as any,
-			cwd: process.cwd(),
-			modelRegistry,
-			resourceLoader,
-			baseToolsOverride,
-		});
-
-		// Subscribe to events for this session
-		session.subscribe(async (event: AgentSessionEvent) => {
-			if (!runState.ctx || !runState.logCtx || !runState.queue) return;
-			if (runState.currentSession !== session) return;
-			handleSessionEvent(event, runState);
-		});
-
-		const entry = { agent: threadAgent, sessionManager, session, lastAccessTime: Date.now() };
-		threadSessions.set(threadTs, entry);
-		log.logInfo(`[${channelId}] Created new thread session: ${threadTs} (total: ${threadSessions.size})`);
-		return entry;
-	}
+	log.logInfo(`[${channelId}:${threadTs}] Created thread runner`);
 
 	// Mutable per-run state - event handler references this
+	// Safe because each runner handles only one thread, and runs are sequential within a thread
 	const runState: {
 		ctx: SlackContext | null;
 		logCtx: { channelId: string; userName?: string; channelName?: string } | null;
@@ -724,7 +711,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		};
 		stopReason: string;
 		errorMessage: string | undefined;
-		currentSession: AgentSession | null;
 	} = {
 		ctx: null,
 		logCtx: null,
@@ -739,8 +725,13 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		},
 		stopReason: "stop",
 		errorMessage: undefined,
-		currentSession: null,
 	};
+
+	// Subscribe to session events (one session per runner, so no need to check currentSession)
+	session.subscribe(async (event: AgentSessionEvent) => {
+		if (!runState.ctx || !runState.logCtx || !runState.queue) return;
+		handleSessionEvent(event, runState);
+	});
 
 	/** Handle session events (shared across all thread sessions) */
 	function handleSessionEvent(event: AgentSessionEvent, state: typeof runState): void {
@@ -893,18 +884,6 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
-
-			// Determine thread context:
-			// - If in an existing thread: use event.thread_ts
-			// - If top-level mention: use the message ts (will become thread parent)
-			const threadTs = ctx.message.thread_ts || ctx.message.ts;
-
-			// Get or create thread-specific session (each with its own Agent)
-			const threadEntry = getThreadSession(threadTs);
-			const { agent: threadAgent, sessionManager, session } = threadEntry;
-
-			// Store current session for abort()
-			runState.currentSession = session;
 
 			// Reload messages from thread's context file
 			const reloadedSession = sessionManager.buildSessionContext();
@@ -1243,15 +1222,12 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			runState.ctx = null;
 			runState.logCtx = null;
 			runState.queue = null;
-			runState.currentSession = null;
 
 			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
 		},
 
 		abort(): void {
-			if (runState.currentSession) {
-				runState.currentSession.abort();
-			}
+			session.abort();
 		},
 	};
 }

@@ -87,31 +87,33 @@ export interface SlackContext {
 
 export interface MomHandler {
 	/**
-	 * Check if channel is currently running (SYNC)
+	 * Check if a thread is currently running (SYNC)
+	 * If threadTs is provided, checks that specific thread.
+	 * If not, checks if any thread in the channel is running.
 	 */
-	isRunning(channelId: string): boolean;
+	isRunning(channelId: string, threadTs?: string): boolean;
 
 	/**
 	 * Handle an event that triggers mom (ASYNC)
-	 * Called only when isRunning() returned false for user messages.
-	 * Events always queue and pass isEvent=true.
+	 * Events are dispatched to the appropriate thread runner.
 	 */
 	handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void>;
 
 	/**
 	 * Handle stop command (ASYNC)
-	 * Called when user says "stop" while mom is running
+	 * If threadTs is provided, stops that specific thread.
+	 * If not, stops all running threads in the channel.
 	 */
-	handleStop(channelId: string, slack: SlackBot): Promise<void>;
+	handleStop(channelId: string, slack: SlackBot, threadTs?: string): Promise<void>;
 }
 
 // ============================================================================
-// Per-channel queue for sequential processing
+// Per-thread queue for sequential processing within a thread
 // ============================================================================
 
 type QueuedWork = () => Promise<void>;
 
-class ChannelQueue {
+class ThreadQueue {
 	private queue: QueuedWork[] = [];
 	private processing = false;
 
@@ -138,6 +140,11 @@ class ChannelQueue {
 	}
 }
 
+/** Generate a thread queue key from channel + thread ts */
+function threadQueueKey(channelId: string, threadTs?: string): string {
+	return threadTs ? `${channelId}:${threadTs}` : channelId;
+}
+
 // ============================================================================
 // SlackBot
 // ============================================================================
@@ -153,7 +160,7 @@ export class SlackBot {
 
 	private users = new Map<string, SlackUser>();
 	private channels = new Map<string, SlackChannel>();
-	private queues = new Map<string, ChannelQueue>();
+	private queues = new Map<string, ThreadQueue>();
 	private getApiKey?: () => Promise<string>;
 	private callHaikuOverride?: (prompt: string, fallback: string) => Promise<string>;
 
@@ -341,12 +348,15 @@ export class SlackBot {
 	 * Returns true if enqueued, false if queue is full (max 5).
 	 */
 	enqueueEvent(event: SlackEvent): boolean {
-		const queue = this.getQueue(event.channel);
+		const eventThreadTs = event.thread_ts || event.ts;
+		const queue = this.getQueue(event.channel, eventThreadTs);
 		if (queue.size() >= 5) {
-			log.logWarning(`Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
+			log.logWarning(
+				`Event queue full for ${event.channel}:${eventThreadTs}, discarding: ${event.text.substring(0, 50)}`,
+			);
 			return false;
 		}
-		log.logInfo(`Enqueueing event for ${event.channel}: ${event.text.substring(0, 50)}`);
+		log.logInfo(`Enqueueing event for ${event.channel}:${eventThreadTs}: ${event.text.substring(0, 50)}`);
 		queue.enqueue(() => this.handler.handleEvent(event, this, true));
 		return true;
 	}
@@ -355,11 +365,12 @@ export class SlackBot {
 	// Private - Event Handlers
 	// ==========================================================================
 
-	private getQueue(channelId: string): ChannelQueue {
-		let queue = this.queues.get(channelId);
+	private getQueue(channelId: string, threadTs?: string): ThreadQueue {
+		const key = threadQueueKey(channelId, threadTs);
+		let queue = this.queues.get(key);
 		if (!queue) {
-			queue = new ChannelQueue();
-			this.queues.set(channelId, queue);
+			queue = new ThreadQueue();
+			this.queues.set(key, queue);
 		}
 		return queue;
 	}
@@ -414,10 +425,13 @@ export class SlackBot {
 				return;
 			}
 
+			// Determine the thread for this message
+			const eventThreadTs = e.thread_ts || e.ts;
+
 			// Check for stop command - execute immediately, don't queue!
 			if (slackEvent.text.toLowerCase().trim() === "stop") {
-				if (this.handler.isRunning(e.channel)) {
-					this.handler.handleStop(e.channel, this); // Don't await, don't queue
+				if (this.handler.isRunning(e.channel, eventThreadTs)) {
+					this.handler.handleStop(e.channel, this, eventThreadTs);
 				} else {
 					this.postMessage(e.channel, "_Nothing running_");
 				}
@@ -425,10 +439,10 @@ export class SlackBot {
 				return;
 			}
 
-			// Enqueue (ChannelQueue handles sequential processing)
-			const queued = this.handler.isRunning(e.channel);
+			// Enqueue (ThreadQueue handles sequential processing within a thread)
+			const queued = this.handler.isRunning(e.channel, eventThreadTs);
 			if (queued) this.addReaction(e.channel, e.ts, "hourglass_flowing_sand");
-			this.getQueue(e.channel).enqueue(async () => {
+			this.getQueue(e.channel, eventThreadTs).enqueue(async () => {
 				if (queued) this.removeReaction(e.channel, e.ts, "hourglass_flowing_sand");
 				await this.handler.handleEvent(slackEvent, this);
 			});
@@ -460,7 +474,7 @@ export class SlackBot {
 			// Skip if before startup
 			if (this.startupTs && e.item.ts < this.startupTs) return;
 
-			// Skip if already busy
+			// Skip if already busy (check channel-level since we don't know thread_ts from reaction)
 			if (this.handler.isRunning(e.item.channel)) return;
 
 			// Handle async
@@ -529,11 +543,14 @@ export class SlackBot {
 				return;
 			}
 
+			// Determine the thread for this message
+			const eventThreadTs = e.thread_ts || e.ts;
+
 			// Check for stop command - execute immediately, don't queue!
 			if (isDM) {
 				if (slackEvent.text.toLowerCase().trim() === "stop") {
-					if (this.handler.isRunning(e.channel)) {
-						this.handler.handleStop(e.channel, this);
+					if (this.handler.isRunning(e.channel, eventThreadTs)) {
+						this.handler.handleStop(e.channel, this, eventThreadTs);
 					} else {
 						this.postMessage(e.channel, "_Nothing running_");
 					}
@@ -547,9 +564,9 @@ export class SlackBot {
 			const shouldHandle = isDM && SlackBot.ADMIN_USER_SET.has(e.user);
 
 			if (shouldHandle) {
-				const queued = this.handler.isRunning(e.channel);
+				const queued = this.handler.isRunning(e.channel, eventThreadTs);
 				if (queued) this.addReaction(e.channel, e.ts, "hourglass_flowing_sand");
-				this.getQueue(e.channel).enqueue(async () => {
+				this.getQueue(e.channel, eventThreadTs).enqueue(async () => {
 					if (queued) this.removeReaction(e.channel, e.ts, "hourglass_flowing_sand");
 					await this.handler.handleEvent(slackEvent, this);
 				});
@@ -937,7 +954,7 @@ export class SlackBot {
 		};
 
 		this.logUserMessage(slackEvent);
-		this.getQueue(channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
+		this.getQueue(channel, messageTs).enqueue(() => this.handler.handleEvent(slackEvent, this));
 	}
 }
 

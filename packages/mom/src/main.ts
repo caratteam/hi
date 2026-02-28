@@ -92,10 +92,10 @@ if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
 await validateSandbox(sandbox);
 
 // ============================================================================
-// State (per channel)
+// State (per thread)
 // ============================================================================
 
-interface ChannelState {
+interface ThreadState {
 	running: boolean;
 	runner: AgentRunner;
 	store: ChannelStore;
@@ -103,19 +103,25 @@ interface ChannelState {
 	stopMessageTs?: string;
 }
 
-const channelStates = new Map<string, ChannelState>();
+/** Key format: "channelId:threadTs" */
+function threadKey(channelId: string, threadTs: string): string {
+	return `${channelId}:${threadTs}`;
+}
 
-function getState(channelId: string): ChannelState {
-	let state = channelStates.get(channelId);
+const threadStates = new Map<string, ThreadState>();
+
+function getState(channelId: string, threadTs: string): ThreadState {
+	const key = threadKey(channelId, threadTs);
+	let state = threadStates.get(key);
 	if (!state) {
 		const channelDir = join(workingDir, channelId);
 		state = {
 			running: false,
-			runner: getOrCreateRunner(sandbox, channelId, channelDir),
+			runner: getOrCreateRunner(sandbox, channelId, channelDir, threadTs),
 			store: new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! }),
 			stopRequested: false,
 		};
-		channelStates.set(channelId, state);
+		threadStates.set(key, state);
 	}
 	return state;
 }
@@ -124,7 +130,7 @@ function getState(channelId: string): ChannelState {
 // Create SlackContext adapter
 // ============================================================================
 
-function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
+function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadState, isEvent?: boolean) {
 	let messageTs: string | null = null;
 	const threadMessageTs: string[] = [];
 	let accumulatedText = "";
@@ -369,31 +375,64 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 // ============================================================================
 
 const handler: MomHandler = {
-	isRunning(channelId: string): boolean {
-		const state = channelStates.get(channelId);
-		return state?.running ?? false;
+	isRunning(channelId: string, threadTs?: string): boolean {
+		if (threadTs) {
+			const state = threadStates.get(threadKey(channelId, threadTs));
+			return state?.running ?? false;
+		}
+		// If no threadTs, check if ANY thread in this channel is running (for DMs without threads)
+		for (const [key, state] of threadStates) {
+			if (key.startsWith(`${channelId}:`) && state.running) return true;
+		}
+		return false;
 	},
 
-	async handleStop(channelId: string, slack: SlackBot): Promise<void> {
-		const state = channelStates.get(channelId);
-		if (state?.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-			const ts = await slack.postMessage(channelId, "_Stopping..._");
-			state.stopMessageTs = ts; // Save for updating later
+	async handleStop(channelId: string, slack: SlackBot, threadTs?: string): Promise<void> {
+		if (threadTs) {
+			const state = threadStates.get(threadKey(channelId, threadTs));
+			if (state?.running) {
+				state.stopRequested = true;
+				state.runner.abort();
+				const ts = await slack.postInThread(channelId, threadTs, "_Stopping..._");
+				state.stopMessageTs = ts;
+			} else {
+				await slack.postInThread(channelId, threadTs, "_Nothing running in this thread_");
+			}
 		} else {
-			await slack.postMessage(channelId, "_Nothing running_");
+			// No threadTs: stop all running threads in this channel
+			let stopped = false;
+			for (const [key, state] of threadStates) {
+				if (key.startsWith(`${channelId}:`) && state.running) {
+					state.stopRequested = true;
+					state.runner.abort();
+					stopped = true;
+				}
+			}
+			if (stopped) {
+				const ts = await slack.postMessage(channelId, "_Stopping..._");
+				// Store on first running state found for update later
+				for (const [key, state] of threadStates) {
+					if (key.startsWith(`${channelId}:`) && state.stopRequested) {
+						state.stopMessageTs = ts;
+						break;
+					}
+				}
+			} else {
+				await slack.postMessage(channelId, "_Nothing running_");
+			}
 		}
 	},
 
 	async handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void> {
-		const state = getState(event.channel);
+		// Determine thread context
+		const eventThreadTs = event.thread_ts || event.ts;
+		const state = getState(event.channel, eventThreadTs);
 
 		// Start run
 		state.running = true;
 		state.stopRequested = false;
 
-		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
+		log.logInfo(`[${event.channel}:${eventThreadTs}] Starting run: ${event.text.substring(0, 50)}`);
 
 		try {
 			// Create context adapter
@@ -410,14 +449,14 @@ const handler: MomHandler = {
 					await slack.updateMessage(event.channel, state.stopMessageTs, "_Stopped_");
 					state.stopMessageTs = undefined;
 				} else {
-					await slack.postMessage(event.channel, "_Stopped_");
+					await slack.postInThread(event.channel, eventThreadTs, "_Stopped_");
 				}
 			}
 		} catch (err) {
 			const errMsg = err instanceof Error ? err.message : String(err);
 			const errStack = err instanceof Error ? err.stack : undefined;
-			log.logWarning(`[${event.channel}] Run error: ${errMsg}`);
-			if (errStack) log.logWarning(`[${event.channel}] Stack: ${errStack}`);
+			log.logWarning(`[${event.channel}:${eventThreadTs}] Run error: ${errMsg}`);
+			if (errStack) log.logWarning(`[${event.channel}:${eventThreadTs}] Stack: ${errStack}`);
 			try {
 				await slack.postInThread(event.channel, event.ts, `_Sorry, something went wrong: ${errMsg}_`);
 			} catch {

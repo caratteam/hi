@@ -1,6 +1,16 @@
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
+import {
+	appendFileSync,
+	closeSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+} from "fs";
 import { basename, join } from "path";
 import { getAdminUsers } from "./access-control.js";
 import * as log from "./log.js";
@@ -220,6 +230,11 @@ export class SlackBot {
 		this.startupTs = (Date.now() / 1000).toFixed(6);
 
 		log.logConnected();
+
+		// Resume any threads that were interrupted by the restart (runs async, after connected)
+		this.resumeIncompleteThreads().catch((err) => {
+			log.logWarning("Failed to resume incomplete threads", err instanceof Error ? err.message : String(err));
+		});
 	}
 
 	getUser(userId: string): SlackUser | undefined {
@@ -772,6 +787,121 @@ export class SlackBot {
 
 		const durationMs = Date.now() - startTime;
 		log.logBackfillComplete(totalMessages, durationMs);
+	}
+
+	// ==========================================================================
+	// Private - Resume Incomplete Threads
+	// ==========================================================================
+
+	/**
+	 * After restart, scan context files for threads that were mid-execution when the process died.
+	 * If the last entry is not a completed assistant text response, and it's recent enough,
+	 * automatically resume by injecting a synthetic continuation event.
+	 *
+	 * This makes restarts transparent to users — if the bot was mid-analysis when it restarted,
+	 * it picks up where it left off without the user needing to say anything.
+	 */
+	private async resumeIncompleteThreads(): Promise<void> {
+		const MAX_AGE_MS = 5 * 60 * 1000; // Only resume threads interrupted within last 5 minutes
+		const now = Date.now();
+		const resumed: string[] = [];
+
+		// Scan all channel directories in workingDir
+		let entries: string[];
+		try {
+			entries = readdirSync(this.workingDir);
+		} catch {
+			return;
+		}
+
+		for (const entry of entries) {
+			const channelDir = join(this.workingDir, entry);
+			// Channel IDs start with C (channels) or D (DMs)
+			if (!entry.startsWith("C") && !entry.startsWith("D")) continue;
+
+			let files: string[];
+			try {
+				files = readdirSync(channelDir).filter((f) => f.startsWith("context-") && f.endsWith(".jsonl"));
+			} catch {
+				continue;
+			}
+
+			for (const file of files) {
+				const filePath = join(channelDir, file);
+
+				// Read last ~10KB to get the last line efficiently
+				let lastLine: string;
+				try {
+					const fd = openSync(filePath, "r");
+					const stat = fstatSync(fd);
+					if (stat.size === 0) {
+						closeSync(fd);
+						continue;
+					}
+					const readSize = Math.min(stat.size, 10240);
+					const buf = Buffer.alloc(readSize);
+					readSync(fd, buf, 0, readSize, stat.size - readSize);
+					closeSync(fd);
+					const lines = buf.toString().trim().split("\n");
+					lastLine = lines[lines.length - 1];
+				} catch {
+					continue;
+				}
+
+				// Parse last entry
+				let lastEntry: {
+					type?: string;
+					timestamp?: string;
+					message?: { role?: string; content?: Array<{ type?: string }> };
+				};
+				try {
+					lastEntry = JSON.parse(lastLine);
+				} catch {
+					continue;
+				}
+
+				// Check if this thread completed normally
+				const role = lastEntry.message?.role;
+				const contentType = lastEntry.message?.content?.[0]?.type;
+				const isComplete = role === "assistant" && contentType === "text";
+				if (isComplete) continue;
+
+				// Check age — only resume recent interruptions
+				const entryTime = lastEntry.timestamp ? new Date(lastEntry.timestamp).getTime() : 0;
+				if (!entryTime || now - entryTime > MAX_AGE_MS) continue;
+
+				// Extract threadTs from filename: context-{threadTs}.jsonl
+				const threadTs = file.replace("context-", "").replace(".jsonl", "");
+				const channelId = entry;
+
+				// Check that this channel exists in our channel list
+				if (!this.channels.has(channelId)) continue;
+
+				log.logInfo(
+					`[${channelId}:${threadTs}] Resuming incomplete thread (last: ${role}/${contentType}, age: ${Math.round((now - entryTime) / 1000)}s)`,
+				);
+
+				// Create a synthetic event to resume the thread.
+				// The text tells the LLM what happened so it can pick up naturally.
+				const syntheticEvent: SlackEvent = {
+					type: channelId.startsWith("D") ? "dm" : "mention",
+					channel: channelId,
+					ts: (Date.now() / 1000).toFixed(6), // synthetic ts
+					thread_ts: threadTs,
+					user: "EVENT",
+					text: "[SYSTEM] 서버 재시작으로 이전 응답이 중단되었습니다. 이전 context를 확인하고 중단된 작업을 이어서 완료해주세요. 유저에게 재시작 사실을 별도로 알릴 필요 없이, 자연스럽게 이어서 진행하세요.",
+				};
+
+				// Enqueue via the handler (not via this.enqueueEvent, which is for event-system events)
+				const queue = this.getQueue(channelId, threadTs);
+				queue.enqueue(() => this.handler.handleEvent(syntheticEvent, this, true));
+				resumed.push(`${channelId}:${threadTs}`);
+			}
+		}
+
+		if (resumed.length > 0) {
+			log.logInfo(`Resumed ${resumed.length} incomplete thread(s): ${resumed.join(", ")}`);
+		}
 	}
 
 	// ==========================================================================

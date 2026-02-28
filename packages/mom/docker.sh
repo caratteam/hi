@@ -46,6 +46,18 @@ case "$1" in
       touch "$DOCKER_ENV_FILE"
     fi
 
+    # Mount auth.json for OAuth token refresh (Anthropic, etc.)
+    AUTH_JSON="$HOME/.pi/mom/auth.json"
+    AUTH_MOUNT=""
+    if [ -f "$AUTH_JSON" ]; then
+      mkdir -p "/tmp/.pi-mom-auth"
+      AUTH_DIR="$(dirname "$AUTH_JSON")"
+      AUTH_MOUNT="-v ${AUTH_DIR}:/root/.pi/mom"
+      echo "  Auth dir: ${AUTH_DIR} -> /root/.pi/mom"
+    else
+      echo "  Warning: ${AUTH_JSON} not found, OAuth tokens won't be available"
+    fi
+
     docker run -d --init \
       --name "$CONTAINER_NAME" \
       --env-file "$DOCKER_ENV_FILE" \
@@ -53,6 +65,7 @@ case "$1" in
       -v "${REPO_ROOT}:/pi-mono" \
       -v "${CLIENT_ROOT}:/carat-client" \
       -v "${ADMIN_ROOT}:/carat-admin" \
+      ${AUTH_MOUNT} \
       "$IMAGE" \
       tail -f /dev/null
     

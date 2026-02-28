@@ -46,22 +46,24 @@ export interface AgentRunner {
 /** Shared AuthStorage instance for API key access */
 let sharedAuthStorage: AuthStorage | null = null;
 
-/** Get API key for a given provider, checking process.env first then AuthStorage */
+/** Get API key for a given provider, checking AuthStorage (auth.json) first then process.env */
 async function getProviderApiKey(authStorage: AuthStorage, provider: string): Promise<string> {
-	// Check process.env first (populated by .mom-env)
+	// Check AuthStorage first (auth.json with OAuth refresh support)
+	try {
+		const key = await authStorage.getApiKey(provider);
+		if (key) return key;
+	} catch {
+		// auth.json missing or refresh failed — fall through to env
+	}
+	// Fall back to process.env (populated by .mom-env)
 	const envKey = PROVIDER_ENV_KEYS[provider];
 	if (envKey && process.env[envKey]) {
 		return process.env[envKey]!;
 	}
-	// Fall back to AuthStorage (reads auth.json + env vars via pi-ai)
-	const key = await authStorage.getApiKey(provider);
-	if (!key) {
-		throw new Error(
-			`No API key found for ${provider}.\n\n` +
-				"Set the key in ~/.mom-env (e.g. OPENROUTER_TOKEN=...) or as an environment variable.",
-		);
-	}
-	return key;
+	throw new Error(
+		`No API key found for ${provider}.\n\n` +
+			"Set the key in ~/.mom-env (e.g. OPENROUTER_TOKEN=...) or as an environment variable.",
+	);
 }
 
 /** Get Anthropic API key for lightweight operations (e.g. reaction classification) */

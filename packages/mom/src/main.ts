@@ -174,13 +174,17 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					accumulatedText = trimFront(accumulatedText);
 					let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
+					const threadTs = event.thread_ts || event.ts;
+					const isSyntheticEvent = event.user === "EVENT";
 					const tryUpdate = async (txt: string) => {
 						if (messageTs) {
 							await slack.updateMessage(event.channel, messageTs, txt);
-						} else if (event.thread_ts) {
-							messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
-						} else {
+						} else if (isSyntheticEvent && !event.thread_ts) {
+							// Synthetic events (periodic/one-shot) have fake ts, post top-level
 							messageTs = await slack.postMessage(event.channel, txt);
+						} else {
+							// Always reply in thread (user's message is the thread parent)
+							messageTs = await slack.postInThread(event.channel, threadTs, txt);
 						}
 					};
 
@@ -203,7 +207,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					}
 
 					if (shouldLog && messageTs) {
-						slack.logBotResponse(event.channel, text, messageTs, event.thread_ts);
+						slack.logBotResponse(event.channel, text, messageTs, threadTs);
 					}
 				})
 				.catch((err) => {
@@ -220,13 +224,15 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					accumulatedText = trimFront(text);
 					let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
+					const threadTs = event.thread_ts || event.ts;
+					const isSyntheticEvent = event.user === "EVENT";
 					const tryUpdate = async (txt: string) => {
 						if (messageTs) {
 							await slack.updateMessage(event.channel, messageTs, txt);
-						} else if (event.thread_ts) {
-							messageTs = await slack.postInThread(event.channel, event.thread_ts, txt);
-						} else {
+						} else if (isSyntheticEvent && !event.thread_ts) {
 							messageTs = await slack.postMessage(event.channel, txt);
+						} else {
+							messageTs = await slack.postInThread(event.channel, threadTs, txt);
 						}
 					};
 
@@ -286,10 +292,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 						if (!messageTs) {
 							accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
 							const displayText = accumulatedText + workingIndicator;
-							if (event.thread_ts) {
-								messageTs = await slack.postInThread(event.channel, event.thread_ts, displayText);
-							} else {
+							const threadTs = event.thread_ts || event.ts;
+							const isSyntheticEvent = event.user === "EVENT";
+							if (isSyntheticEvent && !event.thread_ts) {
 								messageTs = await slack.postMessage(event.channel, displayText);
+							} else {
+								messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 							}
 						}
 					})

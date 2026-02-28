@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage } from "@mariozechner/pi-agent-core";
 import { getModel, type ImageContent, type UserMessage } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
@@ -41,6 +41,7 @@ export interface AgentRunner {
 		pendingMessages?: PendingMessage[],
 	): Promise<{ stopReason: string; errorMessage?: string }>;
 	abort(): void;
+	steer(message: { userName: string; text: string }): void;
 }
 
 /** Shared AuthStorage instance for API key access */
@@ -1228,6 +1229,26 @@ function createRunner(
 
 		abort(): void {
 			session.abort();
+		},
+
+		steer(message: { userName: string; text: string }): void {
+			const now = new Date();
+			const pad = (n: number) => n.toString().padStart(2, "0");
+			const offset = -now.getTimezoneOffset();
+			const offsetSign = offset >= 0 ? "+" : "-";
+			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
+			const offsetMins = pad(Math.abs(offset) % 60);
+			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
+
+			const userMessage: AgentMessage = {
+				role: "user",
+				content: [{ type: "text", text: `[${timestamp}] [${message.userName}]: ${message.text}` }],
+				timestamp: Date.now(),
+			};
+			threadAgent.steer(userMessage);
+			log.logInfo(
+				`[${channelId}:${threadTs}] Steered with message from ${message.userName}: ${message.text.substring(0, 50)}`,
+			);
 		},
 	};
 }

@@ -105,6 +105,12 @@ export interface MomHandler {
 	 * If not, stops all running threads in the channel.
 	 */
 	handleStop(channelId: string, slack: SlackBot, threadTs?: string): Promise<void>;
+
+	/**
+	 * Steer the running agent with a new message (SYNC).
+	 * Injects the message mid-run; agent processes it after current tool execution.
+	 */
+	steerMessage(channelId: string, threadTs: string, userName: string, text: string): void;
 }
 
 // ============================================================================
@@ -439,11 +445,17 @@ export class SlackBot {
 				return;
 			}
 
-			// Enqueue (ThreadQueue handles sequential processing within a thread)
-			const queued = this.handler.isRunning(e.channel, eventThreadTs);
-			if (queued) this.addReaction(e.channel, e.ts, "hourglass_flowing_sand");
+			// If already running, steer the agent instead of queueing
+			if (this.handler.isRunning(e.channel, eventThreadTs)) {
+				const user = this.users.get(e.user);
+				this.handler.steerMessage(e.channel, eventThreadTs, user?.userName || e.user, slackEvent.text);
+				this.addReaction(e.channel, e.ts, "zap");
+				ack();
+				return;
+			}
+
+			// Not running - enqueue normally
 			this.getQueue(e.channel, eventThreadTs).enqueue(async () => {
-				if (queued) this.removeReaction(e.channel, e.ts, "hourglass_flowing_sand");
 				await this.handler.handleEvent(slackEvent, this);
 			});
 
@@ -564,12 +576,17 @@ export class SlackBot {
 			const shouldHandle = isDM && SlackBot.ADMIN_USER_SET.has(e.user);
 
 			if (shouldHandle) {
-				const queued = this.handler.isRunning(e.channel, eventThreadTs);
-				if (queued) this.addReaction(e.channel, e.ts, "hourglass_flowing_sand");
-				this.getQueue(e.channel, eventThreadTs).enqueue(async () => {
-					if (queued) this.removeReaction(e.channel, e.ts, "hourglass_flowing_sand");
-					await this.handler.handleEvent(slackEvent, this);
-				});
+				// If already running, steer the agent instead of queueing
+				if (this.handler.isRunning(e.channel, eventThreadTs)) {
+					const user = this.users.get(e.user);
+					this.handler.steerMessage(e.channel, eventThreadTs, user?.userName || e.user, slackEvent.text);
+					this.addReaction(e.channel, e.ts, "zap");
+				} else {
+					// Not running - enqueue normally
+					this.getQueue(e.channel, eventThreadTs).enqueue(async () => {
+						await this.handler.handleEvent(slackEvent, this);
+					});
+				}
 			}
 
 			// Mention watch: detect when someone mentions an admin user in a channel

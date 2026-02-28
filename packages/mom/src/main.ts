@@ -423,6 +423,13 @@ const handler: MomHandler = {
 		}
 	},
 
+	steerMessage(channelId: string, threadTs: string, userName: string, text: string): void {
+		const state = threadStates.get(threadKey(channelId, threadTs));
+		if (state?.running) {
+			state.runner.steer({ userName, text });
+		}
+	},
+
 	async handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void> {
 		// Determine thread context
 		const eventThreadTs = event.thread_ts || event.ts;

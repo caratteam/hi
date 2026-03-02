@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { PROCESS_BUFFER_MAX } from "./constants.js";
 
 export type SandboxConfig = { type: "host" } | { type: "docker"; container: string };
 
@@ -138,15 +139,15 @@ class HostExecutor implements Executor {
 
 			child.stdout?.on("data", (data) => {
 				stdout += data.toString();
-				if (stdout.length > 10 * 1024 * 1024) {
-					stdout = stdout.slice(0, 10 * 1024 * 1024);
+				if (stdout.length > PROCESS_BUFFER_MAX) {
+					stdout = stdout.slice(0, PROCESS_BUFFER_MAX);
 				}
 			});
 
 			child.stderr?.on("data", (data) => {
 				stderr += data.toString();
-				if (stderr.length > 10 * 1024 * 1024) {
-					stderr = stderr.slice(0, 10 * 1024 * 1024);
+				if (stderr.length > PROCESS_BUFFER_MAX) {
+					stderr = stderr.slice(0, PROCESS_BUFFER_MAX);
 				}
 			});
 

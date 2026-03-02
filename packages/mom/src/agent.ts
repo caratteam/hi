@@ -17,6 +17,13 @@ import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
+import {
+	BASE64_STRIP_THRESHOLD,
+	DEFAULT_CONTEXT_WINDOW,
+	FULL_CONTEXT_RECENT,
+	SLACK_MAX_TEXT,
+	TRUNCATE_THRESHOLD,
+} from "./constants.js";
 import { getLogMessages, MomSettingsManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
@@ -543,12 +550,6 @@ function sanitizeToolPairs(messages: any[], log: any, channelId: string, threadT
 	return result;
 }
 
-/** Threshold in bytes for truncating old tool results */
-const TRUNCATE_THRESHOLD = 4096;
-
-/** Number of recent messages to keep at full size (roughly 2 turns of user+assistant+toolResults) */
-const FULL_CONTEXT_RECENT = 6;
-
 /**
  * Truncate large tool results in older context messages to reduce context bloat.
  *
@@ -659,7 +660,7 @@ function patchSessionManagerPersist(sessionManager: SessionManager): void {
 			if (Array.isArray(content)) {
 				let modified = false;
 				const stripped = content.map((c: any) => {
-					if (c?.data && typeof c.data === "string" && c.data.length > 1000) {
+					if (c?.data && typeof c.data === "string" && c.data.length > BASE64_STRIP_THRESHOLD) {
 						modified = true;
 						const sizeKB = Math.round(c.data.length / 1024);
 						const label = c.type || "binary";
@@ -961,15 +962,14 @@ function createRunner(
 	}
 
 	// Slack message limit
-	const SLACK_MAX_LENGTH = 40000;
 	const splitForSlack = (text: string): string[] => {
-		if (text.length <= SLACK_MAX_LENGTH) return [text];
+		if (text.length <= SLACK_MAX_TEXT) return [text];
 		const parts: string[] = [];
 		let remaining = text;
 		let partNum = 1;
 		while (remaining.length > 0) {
-			const chunk = remaining.substring(0, SLACK_MAX_LENGTH - 50);
-			remaining = remaining.substring(SLACK_MAX_LENGTH - 50);
+			const chunk = remaining.substring(0, SLACK_MAX_TEXT - 50);
+			remaining = remaining.substring(SLACK_MAX_TEXT - 50);
 			const suffix = remaining.length > 0 ? `\n_(continued ${partNum}...)_` : "";
 			parts.push(chunk + suffix);
 			partNum++;
@@ -999,7 +999,7 @@ function createRunner(
 					if (!content || !Array.isArray(content)) continue;
 					for (let i = content.length - 1; i >= 0; i--) {
 						const block = content[i];
-						if (block.data && typeof block.data === "string" && block.data.length > 1000) {
+						if (block.data && typeof block.data === "string" && block.data.length > BASE64_STRIP_THRESHOLD) {
 							const label = block.type || "binary";
 							const mime = block.mimeType || "";
 							content.splice(i, 1, {
@@ -1276,8 +1276,8 @@ function createRunner(
 				} else if (finalText.trim()) {
 					try {
 						const mainText =
-							finalText.length > SLACK_MAX_LENGTH
-								? `${finalText.substring(0, SLACK_MAX_LENGTH - 50)}\n\n_(see thread for full response)_`
+							finalText.length > SLACK_MAX_TEXT
+								? `${finalText.substring(0, SLACK_MAX_TEXT - 50)}\n\n_(see thread for full response)_`
 								: finalText;
 						await ctx.replaceMessage(mainText);
 					} catch (err) {
@@ -1303,7 +1303,7 @@ function createRunner(
 						lastAssistantMessage.usage.cacheRead +
 						lastAssistantMessage.usage.cacheWrite
 					: 0;
-				const contextWindow = actualModel.contextWindow || 200000;
+				const contextWindow = actualModel.contextWindow || DEFAULT_CONTEXT_WINDOW;
 
 				const summary = log.logUsageSummary(
 					runState.logCtx!,

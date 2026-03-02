@@ -13,15 +13,9 @@ import {
 } from "fs";
 import { basename, join } from "path";
 import { getAdminUsers } from "./access-control.js";
+import { SLACK_MAX_TEXT } from "./constants.js";
 import * as log from "./log.js";
 import type { Attachment, ChannelStore } from "./store.js";
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-/** Slack's max text length for chat.postMessage / chat.update is 40000, use a safe margin */
-const SLACK_MAX_TEXT = 39000;
 
 /** Truncate text to fit Slack's message size limit */
 function truncateForSlack(text: string): string {

@@ -2,6 +2,7 @@
 
 import { join, resolve } from "path";
 import { type AgentRunner, callBedrockHaiku, getAnthropicKey, getOrCreateRunner } from "./agent.js";
+import { SLACK_MAX_TEXT, SLACK_MSG_TOO_LONG_FALLBACKS } from "./constants.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
@@ -137,9 +138,6 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadSta
 	let isWorking = true;
 	const workingIndicator = " ...";
 
-	/** Slack's max text length for chat.postMessage / chat.update */
-	const SLACK_MAX_TEXT = 39000;
-
 	/** Trim the front of text to fit within Slack's message limit, keeping the latest content visible */
 	const trimFront = (text: string): string => {
 		if (text.length <= SLACK_MAX_TEXT) return text;
@@ -251,7 +249,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadSta
 							errMsg.includes("msg_too_long") || (errData && JSON.stringify(errData).includes("msg_too_long"));
 						if (isTooLong) {
 							// Retry with progressively shorter text
-							for (const limit of [30000, 20000, 10000, 4000]) {
+							for (const limit of SLACK_MSG_TOO_LONG_FALLBACKS) {
 								try {
 									displayText = trimFront(text.length > limit ? text.slice(text.length - limit) : text);
 									log.logWarning(`replaceMessage msg_too_long, retrying with ${limit} chars`);

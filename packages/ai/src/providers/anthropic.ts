@@ -62,7 +62,7 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.2";
+const claudeCodeVersion = "2.1.62";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -269,6 +269,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							type: "thinking",
 							thinking: "",
 							thinkingSignature: "",
+							index: event.index,
+						};
+						output.content.push(block);
+						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+					} else if (event.content_block.type === "redacted_thinking") {
+						const block: Block = {
+							type: "thinking",
+							thinking: "[Reasoning redacted]",
+							thinkingSignature: event.content_block.data,
+							redacted: true,
 							index: event.index,
 						};
 						output.content.push(block);
@@ -496,10 +506,14 @@ function createClient(
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 ): { client: Anthropic; isOAuthToken: boolean } {
+	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
+	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
+	const needsInterleavedBeta = interleavedThinking && !supportsAdaptiveThinking(model.id);
+
 	// Copilot: Bearer auth, selective betas (no fine-grained-tool-streaming)
 	if (model.provider === "github-copilot") {
 		const betaFeatures: string[] = [];
-		if (interleavedThinking) {
+		if (needsInterleavedBeta) {
 			betaFeatures.push("interleaved-thinking-2025-05-14");
 		}
 
@@ -524,7 +538,7 @@ function createClient(
 	}
 
 	const betaFeatures = ["fine-grained-tool-streaming-2025-05-14"];
-	if (interleavedThinking) {
+	if (needsInterleavedBeta) {
 		betaFeatures.push("interleaved-thinking-2025-05-14");
 	}
 
@@ -540,7 +554,7 @@ function createClient(
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
-					"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
+					"user-agent": `claude-cli/${claudeCodeVersion}`,
 					"x-app": "cli",
 				},
 				model.headers,
@@ -611,7 +625,8 @@ function buildParams(
 		];
 	}
 
-	if (options?.temperature !== undefined) {
+	// Temperature is incompatible with extended thinking (adaptive or budget-based).
+	if (options?.temperature !== undefined && !options?.thinkingEnabled) {
 		params.temperature = options.temperature;
 	}
 
@@ -723,6 +738,14 @@ function convertMessages(
 						text: sanitizeSurrogates(block.text),
 					});
 				} else if (block.type === "thinking") {
+					// Redacted thinking: pass the opaque payload back as redacted_thinking
+					if (block.redacted) {
+						blocks.push({
+							type: "redacted_thinking",
+							data: block.thinkingSignature!,
+						});
+						continue;
+					}
 					if (block.thinking.trim().length === 0) continue;
 					// If thinking signature is missing/empty (e.g., from aborted stream),
 					// convert to plain text block without <thinking> tags to avoid API rejection

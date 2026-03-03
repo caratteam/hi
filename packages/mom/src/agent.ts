@@ -138,6 +138,21 @@ function getMemory(channelDir: string): string {
 	return "(no working memory yet)";
 }
 
+function getLessons(channelDir: string): string {
+	const lessonsPath = join(channelDir, "..", "lessons.md");
+	if (existsSync(lessonsPath)) {
+		try {
+			const content = readFileSync(lessonsPath, "utf-8").trim();
+			if (content) {
+				return content;
+			}
+		} catch (error) {
+			log.logWarning("Failed to read lessons file", `${lessonsPath}: ${error}`);
+		}
+	}
+	return "";
+}
+
 function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
 	// channelDir is the host path (e.g., /Users/.../data/C0A34FL8PMH)
 	// hostWorkspacePath is the parent directory on host
@@ -167,6 +182,7 @@ function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
 	memory: string,
+	lessons: string,
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
 	users: UserInfo[],
@@ -308,7 +324,17 @@ Update when you learn something important or when asked to remember something.
 
 ### Current Memory
 ${memory}
+${
+	lessons
+		? `
+## Lessons Learned
+Past mistakes and proven solutions. Check here BEFORE attempting any approach.
+Write to \`${workspacePath}/lessons.md\` when you discover a new pattern.
 
+${lessons}
+`
+		: ""
+}
 ## Environment Setup
 ${workspacePath}/setup.sh runs automatically on container creation (via docker.sh).
 When you install packages, change config, or modify the environment, add the command to setup.sh so it persists across container rebuilds.
@@ -710,8 +736,9 @@ function createRunner(
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
+	const lessons = getLessons(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, lessons, sandboxConfig, [], [], skills);
 
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
@@ -778,6 +805,7 @@ function createRunner(
 			enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
 		} | null;
 		pendingTools: Map<string, { toolName: string; args: unknown; startTime: number }>;
+		toolErrors: Array<{ toolName: string; args: unknown; error: string }>;
 		totalUsage: {
 			input: number;
 			output: number;
@@ -792,6 +820,7 @@ function createRunner(
 		logCtx: null,
 		queue: null,
 		pendingTools: new Map(),
+		toolErrors: [],
 		totalUsage: {
 			input: 0,
 			output: 0,
@@ -838,8 +867,42 @@ function createRunner(
 
 			if (agentEvent.isError) {
 				log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
+				state.toolErrors.push({
+					toolName: agentEvent.toolName,
+					args: pending?.args,
+					error: resultStr.substring(0, 500),
+				});
 			} else {
 				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
+
+				// Mid-run reflection: if there were errors but this tool succeeded,
+				// inject a steering message to reflect on what went wrong
+				if (state.toolErrors.length > 0) {
+					const errorSummary = state.toolErrors.map((e, i) => `${i + 1}. ${e.toolName}: ${e.error}`).join("\n");
+					const reflectionSteer = `[SYSTEM: MID-RUN REFLECTION]
+You had ${state.toolErrors.length} tool error(s) but recovered successfully:
+
+${errorSummary}
+
+Quick reflection — is this a *structural* pattern (approach X always fails → use approach Y)?
+If yes: append a lesson to /workspace/lessons.md in this format:
+### [Short title]
+- WRONG: [what failed]
+- RIGHT: [what works]
+- Context: [when this applies]
+
+If it was just a transient error (typo, wrong path guess, network), skip it.
+Keep this extremely brief. When done, output exactly "[RESUME]" on its own line, then continue your original task.`;
+
+					const errorCount = state.toolErrors.length;
+					state.toolErrors = []; // Reset so we don't re-trigger
+					log.logInfo(`[${logCtx.channelId}] Injecting mid-run reflection steering (${errorCount} errors)`);
+					session.agent.steer({
+						role: "user",
+						content: [{ type: "text", text: reflectionSteer }],
+						timestamp: Date.now(),
+					});
+				}
 			}
 
 			if (agentEvent.isError) {
@@ -890,11 +953,13 @@ function createRunner(
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
 					queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
+					queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
 				}
 
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
 					queue.enqueueMessage(text, "main", "response main");
+					queue.enqueueMessage(text, "thread", "response thread", false);
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {
@@ -1031,11 +1096,13 @@ function createRunner(
 
 			// Update system prompt with fresh memory, channel/user info, and skills
 			const memory = getMemory(channelDir);
+			const lessons = getLessons(channelDir);
 			const skills = loadMomSkills(channelDir, workspacePath);
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
 				memory,
+				lessons,
 				sandboxConfig,
 				ctx.channels,
 				ctx.users,
@@ -1069,6 +1136,7 @@ function createRunner(
 				channelName: ctx.channelName,
 			};
 			runState.pendingTools.clear();
+			runState.toolErrors = [];
 			runState.totalUsage = {
 				input: 0,
 				output: 0,
@@ -1211,14 +1279,25 @@ function createRunner(
 					log.logWarning("Failed to post error message", errMsg);
 				}
 			} else {
-				// Final message update
+				// Final message update - use last non-reflection assistant message
 				const messages = session.messages;
-				const lastAssistant = messages.filter((m: any) => m.role === "assistant").pop() as any;
-				const finalText =
-					lastAssistant?.content
-						.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
-						.map((c: { type: "text"; text: string }) => c.text)
-						.join("\n") || "";
+				// Find the last assistant message that isn't a reflection response
+				// (reflection responses contain [RESUME] marker)
+				let finalText = "";
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const m = messages[i] as any;
+					if (m.role === "assistant") {
+						const text =
+							m.content
+								?.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
+								.map((c: { type: "text"; text: string }) => c.text)
+								.join("\n") || "";
+						if (!text.includes("[RESUME]")) {
+							finalText = text;
+							break;
+						}
+					}
+				}
 
 				// Check for [SILENT] marker - delete message and thread instead of posting
 				if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {

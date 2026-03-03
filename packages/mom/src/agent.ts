@@ -884,14 +884,16 @@ You had ${state.toolErrors.length} tool error(s) but recovered successfully:
 
 ${errorSummary}
 
-Quick reflection — is this a *structural* pattern (approach X always fails → use approach Y)?
-If yes: append a lesson to /workspace/lessons.md in this format:
+Compare what you put in the failed tool call vs the successful one.
+If YOU changed anything (path, command, parameter, filename, syntax, etc.) to make it work → record it.
+Only skip if you changed NOTHING and it succeeded on pure retry (network timeout, transient AWS error, etc.).
+
+If recording: append to /workspace/lessons.md in this format:
 ### [Short title]
 - WRONG: [what failed]
 - RIGHT: [what works]
 - Context: [when this applies]
 
-If it was just a transient error (typo, wrong path guess, network), skip it.
 Keep this extremely brief. When done, output exactly "[RESUME]" on its own line, then continue your original task.`;
 
 					const errorCount = state.toolErrors.length;

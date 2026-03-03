@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { existsSync, readFileSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, callBedrockHaiku, getAnthropicKey, getOrCreateRunner } from "./agent.js";
 import { SLACK_MAX_TEXT, SLACK_MSG_TOO_LONG_FALLBACKS } from "./constants.js";
@@ -111,6 +112,62 @@ function threadKey(channelId: string, threadTs: string): string {
 
 const threadStates = new Map<string, ThreadState>();
 
+/**
+ * Resolve thread context file mismatch for bot-initiated threads.
+ *
+ * When the event system creates a synthetic event, it uses ts=Date.now() (epoch ms).
+ * The bot posts a top-level message and Slack assigns a real ts (e.g., "1772499600.430449").
+ * When a user replies in that thread, Slack sends thread_ts = the bot message's real ts.
+ * But the context file was saved with the synthetic ts as the key.
+ *
+ * This function detects the mismatch and renames the context file so the thread
+ * context is properly loaded.
+ */
+function resolveThreadTs(channelId: string, threadTs: string): string {
+	const channelDir = join(workingDir, channelId);
+	const contextFile = join(channelDir, `context-${threadTs}.jsonl`);
+
+	// If context file already exists for this threadTs, no mismatch
+	if (existsSync(contextFile)) return threadTs;
+
+	// Check if this threadTs corresponds to a bot message that was posted from a synthetic event.
+	// In log.jsonl, such messages have ts=<real slack ts> and thread_ts=<synthetic ts>.
+	const logFile = join(channelDir, "log.jsonl");
+	if (!existsSync(logFile)) return threadTs;
+
+	try {
+		const lines = readFileSync(logFile, "utf-8").trim().split("\n");
+		// Search from the end for efficiency (recent messages first)
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const line = lines[i];
+			if (!line) continue;
+			try {
+				const entry = JSON.parse(line);
+				// Find a bot message whose Slack ts matches our threadTs
+				// and whose thread_ts is different (the synthetic ts)
+				if (entry.user === "bot" && entry.ts === threadTs && entry.thread_ts && entry.thread_ts !== threadTs) {
+					const originalTs = entry.thread_ts;
+					const originalContextFile = join(channelDir, `context-${originalTs}.jsonl`);
+					if (existsSync(originalContextFile)) {
+						// Rename context file to use the real Slack ts
+						renameSync(originalContextFile, contextFile);
+						log.logInfo(
+							`[${channelId}] Resolved thread context: renamed context-${originalTs}.jsonl -> context-${threadTs}.jsonl`,
+						);
+						return threadTs;
+					}
+				}
+			} catch {
+				// Skip malformed lines
+			}
+		}
+	} catch (err) {
+		log.logWarning(`[${channelId}] Error resolving thread ts`, String(err));
+	}
+
+	return threadTs;
+}
+
 function getState(channelId: string, threadTs: string): ThreadState {
 	const key = threadKey(channelId, threadTs);
 	let state = threadStates.get(key);
@@ -131,7 +188,19 @@ function getState(channelId: string, threadTs: string): ThreadState {
 // Create SlackContext adapter
 // ============================================================================
 
-function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadState, isEvent?: boolean) {
+interface SlackContextOptions {
+	/** Called when a synthetic event posts its first message and gets a real Slack ts.
+	 *  Allows the caller to re-key thread maps so mid-run replies are properly routed. */
+	onThreadKeyResolved?: (syntheticTs: string, realSlackTs: string) => void;
+}
+
+function createSlackContext(
+	event: SlackEvent,
+	slack: SlackBot,
+	state: ThreadState,
+	isEvent?: boolean,
+	options?: SlackContextOptions,
+) {
 	let messageTs: string | null = null;
 	const threadMessageTs: string[] = [];
 	let accumulatedText = "";
@@ -186,6 +255,10 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadSta
 						} else if (isSyntheticEvent && !event.thread_ts) {
 							// Synthetic events (periodic/one-shot) have fake ts, post top-level
 							messageTs = await slack.postMessage(event.channel, txt);
+							// Notify caller so thread maps can be re-keyed with the real Slack ts
+							if (messageTs && options?.onThreadKeyResolved) {
+								options.onThreadKeyResolved(event.ts, messageTs);
+							}
 						} else {
 							// Always reply in thread (user's message is the thread parent)
 							messageTs = await slack.postInThread(event.channel, threadTs, txt);
@@ -235,6 +308,9 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadSta
 							await slack.updateMessage(event.channel, messageTs, txt);
 						} else if (isSyntheticEvent && !event.thread_ts) {
 							messageTs = await slack.postMessage(event.channel, txt);
+							if (messageTs && options?.onThreadKeyResolved) {
+								options.onThreadKeyResolved(event.ts, messageTs);
+							}
 						} else {
 							messageTs = await slack.postInThread(event.channel, threadTs, txt);
 						}
@@ -300,6 +376,10 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ThreadSta
 							const isSyntheticEvent = event.user === "EVENT";
 							if (isSyntheticEvent && !event.thread_ts) {
 								messageTs = await slack.postMessage(event.channel, displayText);
+								// Notify caller so thread maps can be re-keyed with the real Slack ts
+								if (messageTs && options?.onThreadKeyResolved) {
+									options.onThreadKeyResolved(event.ts, messageTs);
+								}
 							} else {
 								messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 							}
@@ -430,7 +510,13 @@ const handler: MomHandler = {
 
 	async handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void> {
 		// Determine thread context
-		const eventThreadTs = event.thread_ts || event.ts;
+		let eventThreadTs = event.thread_ts || event.ts;
+
+		// For user replies in bot-initiated threads (from events), resolve context file mismatch
+		if (event.thread_ts && !isEvent) {
+			eventThreadTs = resolveThreadTs(event.channel, eventThreadTs);
+		}
+
 		const state = getState(event.channel, eventThreadTs);
 
 		// Start run
@@ -440,8 +526,24 @@ const handler: MomHandler = {
 		log.logInfo(`[${event.channel}:${eventThreadTs}] Starting run: ${event.text.substring(0, 50)}`);
 
 		try {
-			// Create context adapter
-			const ctx = createSlackContext(event, slack, state, isEvent);
+			// Create context adapter with thread key resolution for synthetic events.
+			// When a synthetic event posts its first message, Slack assigns a real ts.
+			// We re-key the threadStates map so mid-run replies (steer) are properly routed.
+			const ctx = createSlackContext(event, slack, state, isEvent, {
+				onThreadKeyResolved: (syntheticTs: string, realSlackTs: string) => {
+					// Re-key threadStates so mid-run steer/stop works with real Slack thread_ts
+					const oldKey = threadKey(event.channel, syntheticTs);
+					const newKey = threadKey(event.channel, realSlackTs);
+					const existingState = threadStates.get(oldKey);
+					if (existingState) {
+						threadStates.set(newKey, existingState);
+						threadStates.delete(oldKey);
+						log.logInfo(`[${event.channel}] Re-keyed thread state: ${syntheticTs} -> ${realSlackTs}`);
+					}
+					// Note: The SessionManager continues writing to context-{syntheticTs}.jsonl
+					// during this run. resolveThreadTs() will rename it when a user replies later.
+				},
+			});
 
 			// Run the agent
 			await ctx.setTyping(true);

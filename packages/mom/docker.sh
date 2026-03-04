@@ -61,6 +61,8 @@ case "$1" in
     docker run -d --init \
       --name "$CONTAINER_NAME" \
       --cpus=1.0 \
+      --memory=3g \
+      --memory-swap=3g \
       --env-file "$DOCKER_ENV_FILE" \
       -v "${DATA_DIR}:/workspace" \
       -v "${REPO_ROOT}:/pi-mono" \

@@ -7,8 +7,11 @@
 // Slack message limits
 // ----------------------------------------------------------------------------
 
-/** Slack's max text length for chat.postMessage / chat.update is 40000. Use a safe margin. */
+/** Slack's max text length for chat.postMessage is ~40000 chars. Use a safe margin. */
 export const SLACK_MAX_TEXT = 39000;
+
+/** Slack's chat.update has a much lower limit: ~4000 UTF-8 bytes. Use a safe margin. */
+export const SLACK_UPDATE_MAX_BYTES = 3800;
 
 /** Progressive fallback limits when Slack returns msg_too_long */
 export const SLACK_MSG_TOO_LONG_FALLBACKS = [30000, 20000, 10000, 4000];

@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, callBedrockHaiku, getAnthropicKey, getOrCreateRunner } from "./agent.js";
-import { SLACK_MAX_TEXT } from "./constants.js";
+import { SLACK_MAX_TEXT, SLACK_UPDATE_MAX_BYTES } from "./constants.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
@@ -207,14 +207,29 @@ function createSlackContext(
 	let isWorking = true;
 	const workingIndicator = " ...";
 
-	/** Trim the front of text to fit within Slack's message limit, keeping the latest content visible */
+	/** Get UTF-8 byte length of a string */
+	const byteLen = (s: string) => Buffer.byteLength(s, "utf8");
+
+	/** Trim the front of text to fit within Slack chat.update's byte limit (~4000 bytes) */
 	const trimFront = (text: string): string => {
-		if (text.length <= SLACK_MAX_TEXT) return text;
-		const trimmed = text.slice(text.length - SLACK_MAX_TEXT + 50);
+		if (byteLen(text) <= SLACK_UPDATE_MAX_BYTES) return text;
+		// Binary search for the right slice point that fits within byte limit
+		let lo = 0;
+		let hi = text.length;
+		const target = SLACK_UPDATE_MAX_BYTES - 100; // margin for prefix
+		while (lo < hi - 1) {
+			const mid = Math.floor((lo + hi) / 2);
+			if (byteLen(text.slice(mid)) <= target) {
+				hi = mid;
+			} else {
+				lo = mid;
+			}
+		}
+		const trimmed = text.slice(hi);
 		// Try to find the first newline to avoid cutting mid-line
 		const firstNewline = trimmed.indexOf("\n");
 		const cleanStart = firstNewline > 0 && firstNewline < 200 ? trimmed.slice(firstNewline + 1) : trimmed;
-		return `_... (earlier content trimmed)_\n${cleanStart}`;
+		return `_...(trimmed)_\n${cleanStart}`;
 	};
 	let updatePromise = Promise.resolve();
 
@@ -244,43 +259,21 @@ function createSlackContext(
 			updatePromise = updatePromise
 				.then(async () => {
 					accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+					// trimFront ensures accumulated text fits chat.update byte limit
 					accumulatedText = trimFront(accumulatedText);
-					let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
 					const threadTs = event.thread_ts || event.ts;
 					const isSyntheticEvent = event.user === "EVENT";
-					const tryUpdate = async (txt: string) => {
-						if (messageTs) {
-							await slack.updateMessage(event.channel, messageTs, txt);
-						} else if (isSyntheticEvent && !event.thread_ts) {
-							// Synthetic events (periodic/one-shot) have fake ts, post top-level
-							messageTs = await slack.postMessage(event.channel, txt);
-							// Notify caller so thread maps can be re-keyed with the real Slack ts
-							if (messageTs && options?.onThreadKeyResolved) {
-								options.onThreadKeyResolved(event.ts, messageTs);
-							}
-						} else {
-							// Always reply in thread (user's message is the thread parent)
-							messageTs = await slack.postInThread(event.channel, threadTs, txt);
+					if (messageTs) {
+						await slack.updateMessage(event.channel, messageTs, displayText);
+					} else if (isSyntheticEvent && !event.thread_ts) {
+						messageTs = await slack.postMessage(event.channel, displayText);
+						if (messageTs && options?.onThreadKeyResolved) {
+							options.onThreadKeyResolved(event.ts, messageTs);
 						}
-					};
-
-					try {
-						await tryUpdate(displayText);
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						const errData = (err as { data?: unknown }).data;
-						const isTooLong =
-							errMsg.includes("msg_too_long") || (errData && JSON.stringify(errData).includes("msg_too_long"));
-						if (isTooLong) {
-							// Halve the accumulated text and retry
-							accumulatedText = trimFront(accumulatedText.slice(Math.floor(accumulatedText.length / 2)));
-							displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-							log.logWarning(`respond msg_too_long, retrying with ${displayText.length} chars`);
-							await tryUpdate(displayText);
-						} else {
-							throw err;
-						}
+					} else {
+						messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 					}
 
 					if (shouldLog && messageTs) {
@@ -298,44 +291,70 @@ function createSlackContext(
 			let lastError: unknown;
 			updatePromise = updatePromise
 				.then(async () => {
-					accumulatedText = trimFront(text);
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-
 					const threadTs = event.thread_ts || event.ts;
 					const isSyntheticEvent = event.user === "EVENT";
-					const tryUpdate = async (txt: string) => {
+					const textBytes = byteLen(text);
+
+					// chat.update has a ~4000 byte limit. If text fits, update in place.
+					// If too large, update main msg with trimmed version and post full text in thread.
+					if (textBytes <= SLACK_UPDATE_MAX_BYTES) {
+						accumulatedText = text;
+						const displayText = isWorking ? text + workingIndicator : text;
 						if (messageTs) {
-							await slack.updateMessage(event.channel, messageTs, txt);
+							await slack.updateMessage(event.channel, messageTs, displayText);
 						} else if (isSyntheticEvent && !event.thread_ts) {
-							messageTs = await slack.postMessage(event.channel, txt);
+							messageTs = await slack.postMessage(event.channel, displayText);
 							if (messageTs && options?.onThreadKeyResolved) {
 								options.onThreadKeyResolved(event.ts, messageTs);
 							}
 						} else {
-							messageTs = await slack.postInThread(event.channel, threadTs, txt);
+							messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 						}
-					};
-
-					try {
-						await tryUpdate(displayText);
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						const errData = (err as { data?: unknown }).data;
-						const isTooLong =
-							errMsg.includes("msg_too_long") || (errData && JSON.stringify(errData).includes("msg_too_long"));
-						if (isTooLong) {
-							// Retry by halving text until it fits
-							let retryText = displayText;
-							for (let i = 0; i < 5; i++) {
-								retryText = trimFront(retryText.slice(Math.floor(retryText.length / 2)));
-								log.logWarning(`replaceMessage msg_too_long, retrying with ${retryText.length} chars`);
-								try {
-									await tryUpdate(retryText);
-									return;
-								} catch {}
+					} else {
+						// Text exceeds chat.update byte limit.
+						// For streaming (isWorking=true), trim front to show latest content.
+						// For final response (isWorking=false), post full text via postMessage in thread.
+						if (isWorking) {
+							// Streaming: trim to fit update limit
+							accumulatedText = trimFront(text);
+							const displayText = accumulatedText + workingIndicator;
+							try {
+								if (messageTs) {
+									await slack.updateMessage(event.channel, messageTs, displayText);
+								} else {
+									messageTs = await slack.postInThread(event.channel, threadTs, displayText);
+								}
+							} catch {
+								// If even trimmed version fails, silently continue streaming
 							}
+						} else {
+							// Final response: update main msg with trimmed preview, post full in thread
+							const trimmed = trimFront(text);
+							log.logInfo(
+								`replaceMessage: text too large for update (${textBytes} bytes), posting full text in thread`,
+							);
+							try {
+								if (messageTs) {
+									await slack.updateMessage(
+										event.channel,
+										messageTs,
+										`${trimmed}\n\n_(full response in thread)_`,
+									);
+								}
+							} catch {
+								// If even trimmed update fails, that's fine - thread will have the full text
+							}
+
+							// Post full text in thread via postMessage (supports ~40000 chars)
+							const replyTs = messageTs || threadTs;
+							// Split into chunks that fit postMessage limit
+							const chunkSize = SLACK_MAX_TEXT;
+							for (let i = 0; i < text.length; i += chunkSize) {
+								const chunk = text.slice(i, i + chunkSize);
+								await slack.postInThread(event.channel, replyTs, chunk);
+							}
+							accumulatedText = text;
 						}
-						throw err;
 					}
 				})
 				.catch((err) => {

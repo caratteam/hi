@@ -312,49 +312,33 @@ function createSlackContext(
 						}
 					} else {
 						// Text exceeds chat.update byte limit.
-						// For streaming (isWorking=true), trim front to show latest content.
-						// For final response (isWorking=false), post full text via postMessage in thread.
-						if (isWorking) {
-							// Streaming: trim to fit update limit
-							accumulatedText = trimFront(text);
-							const displayText = accumulatedText + workingIndicator;
-							try {
-								if (messageTs) {
-									await slack.updateMessage(event.channel, messageTs, displayText);
-								} else {
-									messageTs = await slack.postInThread(event.channel, threadTs, displayText);
-								}
-							} catch {
-								// If even trimmed version fails, silently continue streaming
+						// replaceMessage is always a "final answer" replacement,
+						// so post full text in thread regardless of isWorking state.
+						const trimmed = trimFront(text);
+						log.logInfo(
+							`replaceMessage: text too large for update (${textBytes} bytes), posting full text in thread`,
+						);
+						try {
+							if (messageTs) {
+								await slack.updateMessage(
+									event.channel,
+									messageTs,
+									`${trimmed}\n\n_(full response in thread)_`,
+								);
 							}
-						} else {
-							// Final response: update main msg with trimmed preview, post full in thread
-							const trimmed = trimFront(text);
-							log.logInfo(
-								`replaceMessage: text too large for update (${textBytes} bytes), posting full text in thread`,
-							);
-							try {
-								if (messageTs) {
-									await slack.updateMessage(
-										event.channel,
-										messageTs,
-										`${trimmed}\n\n_(full response in thread)_`,
-									);
-								}
-							} catch {
-								// If even trimmed update fails, that's fine - thread will have the full text
-							}
-
-							// Post full text in thread via postMessage (supports ~40000 chars)
-							const replyTs = messageTs || threadTs;
-							// Split into chunks that fit postMessage limit
-							const chunkSize = SLACK_MAX_TEXT;
-							for (let i = 0; i < text.length; i += chunkSize) {
-								const chunk = text.slice(i, i + chunkSize);
-								await slack.postInThread(event.channel, replyTs, chunk);
-							}
-							accumulatedText = text;
+						} catch {
+							// If even trimmed update fails, that's fine - thread will have the full text
 						}
+
+						// Post full text in thread via postMessage (supports ~40000 chars)
+						const replyTs = messageTs || threadTs;
+						// Split into chunks that fit postMessage limit
+						const chunkSize = SLACK_MAX_TEXT;
+						for (let i = 0; i < text.length; i += chunkSize) {
+							const chunk = text.slice(i, i + chunkSize);
+							await slack.postInThread(event.channel, replyTs, chunk);
+						}
+						accumulatedText = text;
 					}
 				})
 				.catch((err) => {

@@ -2,7 +2,7 @@
 
 import { existsSync, readFileSync, renameSync } from "fs";
 import { join, resolve } from "path";
-import { type AgentRunner, callBedrockHaiku, getAnthropicKey, getOrCreateRunner } from "./agent.js";
+import { type AgentRunner, callBedrockHaiku, evictRunner, getAnthropicKey, getOrCreateRunner } from "./agent.js";
 import { SLACK_MAX_TEXT, SLACK_UPDATE_MAX_BYTES } from "./constants.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
@@ -123,17 +123,23 @@ const threadStates = new Map<string, ThreadState>();
  * This function detects the mismatch and renames the context file so the thread
  * context is properly loaded.
  */
-function resolveThreadTs(channelId: string, threadTs: string): string {
+interface ResolveResult {
+	threadTs: string;
+	/** If a context file was renamed, this is the original synthetic ts it was renamed from */
+	renamedFrom?: string;
+}
+
+function resolveThreadTs(channelId: string, threadTs: string): ResolveResult {
 	const channelDir = join(workingDir, channelId);
 	const contextFile = join(channelDir, `context-${threadTs}.jsonl`);
 
 	// If context file already exists for this threadTs, no mismatch
-	if (existsSync(contextFile)) return threadTs;
+	if (existsSync(contextFile)) return { threadTs };
 
 	// Check if this threadTs corresponds to a bot message that was posted from a synthetic event.
 	// In log.jsonl, such messages have ts=<real slack ts> and thread_ts=<synthetic ts>.
 	const logFile = join(channelDir, "log.jsonl");
-	if (!existsSync(logFile)) return threadTs;
+	if (!existsSync(logFile)) return { threadTs };
 
 	try {
 		const lines = readFileSync(logFile, "utf-8").trim().split("\n");
@@ -154,7 +160,7 @@ function resolveThreadTs(channelId: string, threadTs: string): string {
 						log.logInfo(
 							`[${channelId}] Resolved thread context: renamed context-${originalTs}.jsonl -> context-${threadTs}.jsonl`,
 						);
-						return threadTs;
+						return { threadTs, renamedFrom: originalTs };
 					}
 				}
 			} catch {
@@ -165,7 +171,7 @@ function resolveThreadTs(channelId: string, threadTs: string): string {
 		log.logWarning(`[${channelId}] Error resolving thread ts`, String(err));
 	}
 
-	return threadTs;
+	return { threadTs };
 }
 
 function getState(channelId: string, threadTs: string): ThreadState {
@@ -516,9 +522,22 @@ const handler: MomHandler = {
 		// Determine thread context
 		let eventThreadTs = event.thread_ts || event.ts;
 
-		// For user replies in bot-initiated threads (from events), resolve context file mismatch
+		// For user replies in bot-initiated threads (from events), resolve context file mismatch.
+		// If the context file was renamed (synthetic ts -> real Slack ts), we must also evict
+		// any cached runner/state that was re-keyed by onThreadKeyResolved during the original
+		// event run, since that runner's SessionManager still points to the old filename.
 		if (event.thread_ts && !isEvent) {
-			eventThreadTs = resolveThreadTs(event.channel, eventThreadTs);
+			const resolved = resolveThreadTs(event.channel, eventThreadTs);
+			eventThreadTs = resolved.threadTs;
+			if (resolved.renamedFrom) {
+				// The old runner (created with synthetic ts) was re-keyed to eventThreadTs
+				// by onThreadKeyResolved. Its SessionManager still writes to context-{syntheticTs}.jsonl
+				// which no longer exists. Evict it so getState creates a fresh runner.
+				const staleKey = threadKey(event.channel, eventThreadTs);
+				threadStates.delete(staleKey);
+				// Also evict from the runner cache (keyed by original synthetic ts)
+				evictRunner(event.channel, resolved.renamedFrom);
+			}
 		}
 
 		const state = getState(event.channel, eventThreadTs);

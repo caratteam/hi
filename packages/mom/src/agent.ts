@@ -424,6 +424,20 @@ function evictStaleRunners(): void {
 }
 
 /**
+ * Evict a cached runner for a specific thread.
+ * Used when the context file has been renamed (e.g., synthetic ts -> real Slack ts)
+ * so the next getOrCreateRunner call creates a fresh runner pointing to the correct file.
+ */
+export function evictRunner(channelId: string, threadTs: string): void {
+	const key = `${channelId}:${threadTs}`;
+	if (threadRunners.has(key)) {
+		threadRunners.delete(key);
+		threadRunnerLastAccess.delete(key);
+		log.logInfo(`Evicted runner for renamed thread: ${key}`);
+	}
+}
+
+/**
  * Get or create an AgentRunner for a specific thread.
  * Runners are cached - one per thread, persistent across messages in the same thread.
  */

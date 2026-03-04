@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, callBedrockHaiku, getAnthropicKey, getOrCreateRunner } from "./agent.js";
-import { SLACK_MAX_TEXT, SLACK_MSG_TOO_LONG_FALLBACKS } from "./constants.js";
+import { SLACK_MAX_TEXT } from "./constants.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
@@ -299,7 +299,7 @@ function createSlackContext(
 			updatePromise = updatePromise
 				.then(async () => {
 					accumulatedText = trimFront(text);
-					let displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 
 					const threadTs = event.thread_ts || event.ts;
 					const isSyntheticEvent = event.user === "EVENT";
@@ -324,12 +324,13 @@ function createSlackContext(
 						const isTooLong =
 							errMsg.includes("msg_too_long") || (errData && JSON.stringify(errData).includes("msg_too_long"));
 						if (isTooLong) {
-							// Retry with progressively shorter text
-							for (const limit of SLACK_MSG_TOO_LONG_FALLBACKS) {
+							// Retry by halving text until it fits
+							let retryText = displayText;
+							for (let i = 0; i < 5; i++) {
+								retryText = trimFront(retryText.slice(Math.floor(retryText.length / 2)));
+								log.logWarning(`replaceMessage msg_too_long, retrying with ${retryText.length} chars`);
 								try {
-									displayText = trimFront(text.length > limit ? text.slice(text.length - limit) : text);
-									log.logWarning(`replaceMessage msg_too_long, retrying with ${limit} chars`);
-									await tryUpdate(displayText);
+									await tryUpdate(retryText);
 									return;
 								} catch {}
 							}

@@ -1310,14 +1310,27 @@ Keep this extremely brief. When done, output exactly "[RESUME]" on its own line,
 					}
 				} else if (finalText.trim()) {
 					try {
-						const mainText =
-							finalText.length > SLACK_MAX_TEXT
-								? `${finalText.substring(0, SLACK_MAX_TEXT - 50)}\n\n_(see thread for full response)_`
-								: finalText;
-						await ctx.replaceMessage(mainText);
+						await ctx.replaceMessage(finalText);
 					} catch (err) {
 						const errMsg = err instanceof Error ? err.message : String(err);
 						log.logWarning("Failed to replace message with final text", errMsg);
+						// Fallback: split into chunks and post in thread so user sees full answer
+						try {
+							const chunks = splitForSlack(finalText);
+							// Replace the streaming message with the first chunk
+							try {
+								await ctx.replaceMessage(chunks[0]);
+							} catch {
+								// If even the first chunk fails, post it in thread instead
+								await ctx.respondInThread(chunks[0]);
+							}
+							// Post remaining chunks as thread replies
+							for (let i = 1; i < chunks.length; i++) {
+								await ctx.respondInThread(chunks[i]);
+							}
+						} catch (innerErr) {
+							log.logWarning("Failed to post final text in thread too", String(innerErr));
+						}
 					}
 				}
 			}

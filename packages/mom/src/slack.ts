@@ -26,6 +26,35 @@ function truncateForSlack(text: string): string {
 	return text;
 }
 
+/**
+ * Sanitize text for Slack mrkdwn.
+ * Escapes lone tildes (~) used as "approximately" to prevent unintended strikethrough.
+ * Slack strikethrough syntax: ~text~ (tilde-wrapped text).
+ * We only escape tildes OUTSIDE of code blocks (``` ... ```) and inline code (` ... `).
+ */
+function sanitizeForSlack(text: string): string {
+	// Split text into code and non-code segments
+	// Process: first split by code blocks (```), then by inline code (`)
+	const codeBlockParts = text.split(/(```[\s\S]*?```)/);
+	return codeBlockParts
+		.map((part) => {
+			// Don't touch code blocks
+			if (part.startsWith("```") && part.endsWith("```")) return part;
+			// Within non-code-block segments, split by inline code
+			const inlineCodeParts = part.split(/(`[^`]+`)/);
+			return inlineCodeParts
+				.map((segment) => {
+					// Don't touch inline code
+					if (segment.startsWith("`") && segment.endsWith("`")) return segment;
+					// Replace lone ~ used as "approximately" (e.g., ~$334, ~2.9TB)
+					// Pattern: ~ followed by a digit or $ (common "approx" usage)
+					return segment.replace(/~(?=[\d$])/g, "≈");
+				})
+				.join("");
+		})
+		.join("");
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -248,7 +277,7 @@ export class SlackBot {
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		const truncated = truncateForSlack(text);
+		const truncated = truncateForSlack(sanitizeForSlack(text));
 		log.logInfo(`[slack] postMessage: ${text.length} chars -> ${truncated.length} chars`);
 		try {
 			const result = await this.webClient.chat.postMessage({ channel, text: truncated });
@@ -264,7 +293,7 @@ export class SlackBot {
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
-		const truncated = truncateForSlack(text);
+		const truncated = truncateForSlack(sanitizeForSlack(text));
 		log.logInfo(`[slack] updateMessage: ${text.length} chars -> ${truncated.length} chars`);
 		try {
 			await this.webClient.chat.update({ channel, ts, text: truncated });
@@ -283,7 +312,7 @@ export class SlackBot {
 	}
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
-		const truncated = truncateForSlack(text);
+		const truncated = truncateForSlack(sanitizeForSlack(text));
 		log.logInfo(`[slack] postInThread: ${text.length} chars -> ${truncated.length} chars`);
 		try {
 			const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncated });

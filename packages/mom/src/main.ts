@@ -2,7 +2,7 @@
 
 import { existsSync, readFileSync, renameSync } from "fs";
 import { join, resolve } from "path";
-import { type AgentRunner, callBedrockHaiku, evictRunner, getAnthropicKey, getOrCreateRunner } from "./agent.js";
+import { type AgentRunner, evictRunner, getAnthropicKey, getOrCreateRunner } from "./agent.js";
 import { SLACK_MAX_TEXT, SLACK_UPDATE_MAX_BYTES } from "./constants.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
@@ -613,7 +613,6 @@ const bot = new SlackBotClass(handler, {
 	workingDir,
 	store: sharedStore,
 	getApiKey: getAnthropicKey,
-	callHaiku: callBedrockHaiku,
 });
 
 // Start events watcher

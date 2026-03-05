@@ -1329,9 +1329,12 @@ Then output "[RESUME]" and continue your task.`;
 				}
 
 				if (finalText.trim()) {
-					// For top-level messages (no thread_ts), update the main message
-					// with final response so it's visible without opening the thread.
-					if (!ctx.message.thread_ts) {
+					// For bot-initiated top-level messages (EVENT with no thread_ts),
+					// update the main message with final response so it's visible without opening the thread.
+					// When a user sends a top-level message and the bot replies in thread,
+					// we should NOT replace the bot's reply — keep the intermediate tool call labels visible.
+					const isBotTopLevel = ctx.message.user === "EVENT" && !ctx.message.thread_ts;
+					if (isBotTopLevel) {
 						try {
 							await ctx.replaceMessage(finalText);
 						} catch (err) {

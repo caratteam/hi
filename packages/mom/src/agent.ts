@@ -987,7 +987,8 @@ Then output "[RESUME]" and continue your task.`;
 
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
-					queue.enqueueMessage(text, "main", "response main");
+					// Final text response is posted only as a thread reply (at end of run),
+					// not accumulated into the main status message (which shows tool labels).
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {

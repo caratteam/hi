@@ -1329,7 +1329,17 @@ Then output "[RESUME]" and continue your task.`;
 				}
 
 				if (finalText.trim()) {
-					// Post final response as a thread reply (preserves the status message with tool labels)
+					// For top-level messages (no thread_ts), update the main message
+					// with final response so it's visible without opening the thread.
+					if (!ctx.message.thread_ts) {
+						try {
+							await ctx.replaceMessage(finalText);
+						} catch (err) {
+							const errMsg = err instanceof Error ? err.message : String(err);
+							log.logWarning("Failed to update main message with final text", errMsg);
+						}
+					}
+					// Always post full response in thread
 					try {
 						const chunks = splitForSlack(finalText);
 						for (const chunk of chunks) {

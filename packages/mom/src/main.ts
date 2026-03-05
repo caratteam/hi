@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, evictRunner, getAnthropicKey, getOrCreateRunner } from "./agent.js";
-import { SLACK_MAX_TEXT, SLACK_UPDATE_MAX_BYTES } from "./constants.js";
+import { SLACK_UPDATE_MAX_BYTES } from "./constants.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
@@ -329,19 +329,26 @@ function createSlackContext(
 						}
 					} else {
 						// Text exceeds chat.update byte limit.
-						// Post full text in thread to preserve everything.
+						// Update main message with truncated version so it's visible at top level.
 						log.logInfo(
-							`replaceMessage: text too large for update (${textBytes} bytes), posting full text in thread`,
+							`replaceMessage: text too large for update (${textBytes} bytes), truncating main message`,
 						);
 
-						// Post full text in thread via postMessage (supports ~40000 chars)
-						const replyTs = event.thread_ts || messageTs || event.ts;
-						// Split into chunks that fit postMessage limit
-						const chunkSize = SLACK_MAX_TEXT;
-						for (let i = 0; i < text.length; i += chunkSize) {
-							const chunk = text.slice(i, i + chunkSize);
-							const ts = await slack.postInThread(event.channel, replyTs, chunk);
-							threadMessageTs.push(ts);
+						if (messageTs) {
+							// Truncate to fit chat.update limit, leaving room for " _(see thread)_"
+							const suffix = " _(see thread)_";
+							const suffixBytes = byteLen(suffix);
+							const maxContentBytes = SLACK_UPDATE_MAX_BYTES - suffixBytes;
+							let truncated = text;
+							// Trim by characters until it fits byte limit
+							while (byteLen(truncated) > maxContentBytes && truncated.length > 0) {
+								// Cut roughly by ratio, with safety margin
+								const ratio = maxContentBytes / byteLen(truncated);
+								const newLen = Math.max(1, Math.floor(truncated.length * ratio) - 10);
+								truncated = truncated.substring(0, newLen);
+							}
+							const displayText = isWorking ? truncated + suffix + workingIndicator : truncated + suffix;
+							await slack.updateMessage(event.channel, messageTs, displayText);
 						}
 						accumulatedText = text;
 					}

@@ -321,6 +321,10 @@ Update when you learn something important or when asked to remember something.
 
 ### Current Memory
 ${memory}
+
+### IMPORTANT: Record Decisions Immediately
+When a new plan, decision, TODO, or phase emerges during conversation (e.g., "we should add recovery mechanism", "let's do Phase 5 for X"), do NOT just acknowledge it verbally. Immediately write it to the relevant skill file (SKILL.md, ARCHITECTURE.md) in that same turn. "I'll remember" is NOT recording — only writing to a file counts.
+
 ${
 	lessons
 		? `

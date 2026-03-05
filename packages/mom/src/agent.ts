@@ -331,6 +331,8 @@ ${
 Past mistakes and proven solutions. Check here BEFORE attempting any approach.
 Write to \`${workspacePath}/lessons.md\` when you discover a new pattern.
 
+Recording policy: When you try something that fails and then succeed by changing your approach, ALWAYS record the lesson unless the exact pattern is already in this file. "I didn't know" or "it was obvious" are NOT reasons to skip — the whole point is to know next time. Examples: wrong file path → right path, query too large → smaller range, wrong syntax → correct syntax.
+
 ${lessons}
 `
 		: ""
@@ -892,23 +894,38 @@ function createRunner(
 				// Mid-run reflection: if there were errors but this tool succeeded,
 				// inject a steering message to reflect on what went wrong
 				if (state.toolErrors.length > 0) {
-					const errorSummary = state.toolErrors.map((e, i) => `${i + 1}. ${e.toolName}: ${e.error}`).join("\n");
-					const reflectionSteer = `[SYSTEM: MID-RUN REFLECTION]
-You had ${state.toolErrors.length} tool error(s) but recovered successfully:
+					const errorSummary = state.toolErrors
+						.map((e, i) => {
+							const argsStr = e.args ? JSON.stringify(e.args).substring(0, 300) : "(no args)";
+							return `${i + 1}. ${e.toolName}(${argsStr}): ${e.error}`;
+						})
+						.join("\n");
+					const successArgs = pending?.args ? JSON.stringify(pending.args).substring(0, 300) : "(no args)";
+					const reflectionSteer = `[SYSTEM: LESSON REQUIRED]
+You failed ${state.toolErrors.length} time(s) then succeeded. This is a learning opportunity.
 
+Failed attempts:
 ${errorSummary}
 
-Compare what you put in the failed tool call vs the successful one.
-If YOU changed anything (path, command, parameter, filename, syntax, etc.) to make it work → record it.
-Only skip if you changed NOTHING and it succeeded on pure retry (network timeout, transient AWS error, etc.).
+Successful attempt:
+${agentEvent.toolName}(${successArgs})
 
-If recording: append to /workspace/lessons.md in this format:
+You MUST record a lesson. The ONLY exception is if you changed absolutely nothing between the failed and successful calls (e.g., a transient network error that resolved on retry).
+
+If the path changed → record it (e.g., "X is at /workspace/X, not /X").
+If the query/command changed → record it (e.g., "table Y needs smaller date ranges").
+If the syntax changed → record it (e.g., "use CAST() not :: in asyncpg").
+If a parameter changed → record it.
+
+Do NOT rationalize skipping. "I didn't know the first time" is exactly WHY you record it — so next time you DO know.
+
+Append to /workspace/lessons.md:
 ### [Short title]
-- WRONG: [what failed]
-- RIGHT: [what works]
+- WRONG: [what failed — be specific]
+- RIGHT: [what works — be specific]
 - Context: [when this applies]
 
-Keep this extremely brief. When done, output exactly "[RESUME]" on its own line, then continue your original task.`;
+Then output "[RESUME]" and continue your task.`;
 
 					const errorCount = state.toolErrors.length;
 					state.toolErrors = []; // Reset so we don't re-trigger

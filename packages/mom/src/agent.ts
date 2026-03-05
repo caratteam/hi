@@ -312,9 +312,6 @@ You receive a message like:
 \`\`\`
 Immediate and one-shot events auto-delete after triggering. Periodic events persist until you delete them.
 
-### Silent Completion
-For periodic events where there's nothing to report, respond with just \`[SILENT]\` (no other text). This deletes the status message and posts nothing to Slack. Use this to avoid spamming the channel when periodic checks find nothing actionable.
-
 ### Debouncing
 When writing programs that create immediate events (email watchers, webhook handlers, etc.), always debounce. If 50 emails arrive in a minute, don't create 50 immediate events. Instead collect events over a window and create ONE immediate event summarizing what happened, or just signal "new activity, check inbox" rather than per-item events. Or simpler: use a periodic event to check for new items every N minutes instead of immediate events.
 
@@ -1330,38 +1327,16 @@ Then output "[RESUME]" and continue your task.`;
 					}
 				}
 
-				// Check for [SILENT] marker - delete message and thread instead of posting
-				if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
+				if (finalText.trim()) {
+					// Post final response as a thread reply (preserves the status message with tool labels)
 					try {
-						await ctx.deleteMessage();
-						log.logInfo("Silent response - deleted message and thread");
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to delete message for silent response", errMsg);
-					}
-				} else if (finalText.trim()) {
-					try {
-						await ctx.replaceMessage(finalText);
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to replace message with final text", errMsg);
-						// Fallback: split into chunks and post in thread so user sees full answer
-						try {
-							const chunks = splitForSlack(finalText);
-							// Replace the streaming message with the first chunk
-							try {
-								await ctx.replaceMessage(chunks[0]);
-							} catch {
-								// If even the first chunk fails, post it in thread instead
-								await ctx.respondInThread(chunks[0]);
-							}
-							// Post remaining chunks as thread replies
-							for (let i = 1; i < chunks.length; i++) {
-								await ctx.respondInThread(chunks[i]);
-							}
-						} catch (innerErr) {
-							log.logWarning("Failed to post final text in thread too", String(innerErr));
+						const chunks = splitForSlack(finalText);
+						for (const chunk of chunks) {
+							await ctx.respondInThread(chunk);
 						}
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						log.logWarning("Failed to post final text in thread", errMsg);
 					}
 				}
 			}

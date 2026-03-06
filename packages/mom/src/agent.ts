@@ -884,11 +884,16 @@ function createRunner(
 
 			if (agentEvent.isError) {
 				log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
-				state.toolErrors.push({
-					toolName: agentEvent.toolName,
-					args: pending?.args,
-					error: resultStr.substring(0, 500),
-				});
+				// "Skipped due to queued user message" is a system-level skip, not an agent mistake.
+				// Don't count it as a tool error — it would trigger cascading SYSTEM LESSON injections
+				// where each lesson recording causes another skip, creating an infinite loop.
+				if (!resultStr.includes("Skipped due to queued user message")) {
+					state.toolErrors.push({
+						toolName: agentEvent.toolName,
+						args: pending?.args,
+						error: resultStr.substring(0, 500),
+					});
+				}
 			} else {
 				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
 
@@ -1312,10 +1317,11 @@ Then output "[RESUME]" and continue your task.`;
 					log.logWarning("Failed to post error message", errMsg);
 				}
 			} else {
-				// Final message update - use last non-reflection assistant message
+				// Final message update - use last assistant message with meaningful content.
+				// Reflection responses (SYSTEM LESSON) contain [RESUME] marker.
+				// Strategy: prefer non-RESUME messages, but if the last message has
+				// [RESUME], extract text after it (the actual continuation content).
 				const messages = session.messages;
-				// Find the last assistant message that isn't a reflection response
-				// (reflection responses contain [RESUME] marker)
 				let finalText = "";
 				for (let i = messages.length - 1; i >= 0; i--) {
 					const m = messages[i] as any;
@@ -1326,9 +1332,19 @@ Then output "[RESUME]" and continue your task.`;
 								.map((c: { type: "text"; text: string }) => c.text)
 								.join("\n") || "";
 						if (!text.includes("[RESUME]")) {
+							// Clean message with no reflection - use as-is
 							finalText = text;
 							break;
 						}
+						// Message contains [RESUME] - extract content after the last [RESUME]
+						const resumeIdx = text.lastIndexOf("[RESUME]");
+						const afterResume = text.substring(resumeIdx + "[RESUME]".length).trim();
+						if (afterResume) {
+							// Has meaningful content after [RESUME] - use it
+							finalText = afterResume;
+							break;
+						}
+						// Only [RESUME] with no real content after it - skip and check earlier messages
 					}
 				}
 

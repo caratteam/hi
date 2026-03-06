@@ -218,6 +218,8 @@ function createSlackContext(
 
 	/** Track overflow messages posted to thread when accumulated text exceeds chat.update limit */
 	let overflowMessageTs: string | null = null;
+	/** Accumulated text for the current overflow message (reset when a new overflow message is posted) */
+	let overflowAccumulatedText = "";
 
 	let updatePromise = Promise.resolve();
 
@@ -270,25 +272,34 @@ function createSlackContext(
 						// Overflow: accumulated text too large for chat.update.
 						// Post new text as a thread message to preserve everything.
 						const replyTs = event.thread_ts || messageTs || event.ts;
+						// Accumulate text for the overflow message
+						overflowAccumulatedText = overflowAccumulatedText ? `${overflowAccumulatedText}\n${text}` : text;
+						const overflowDisplayText = isWorking
+							? overflowAccumulatedText + workingIndicator
+							: overflowAccumulatedText;
 						if (overflowMessageTs) {
-							// Update the existing overflow message with new text appended
-							const overflowBytes = byteLen(text);
-							if (overflowBytes <= SLACK_UPDATE_MAX_BYTES) {
+							// Update the existing overflow message with accumulated text
+							const overflowDisplayBytes = byteLen(overflowDisplayText);
+							if (overflowDisplayBytes <= SLACK_UPDATE_MAX_BYTES) {
 								try {
-									await slack.updateMessage(event.channel, overflowMessageTs, text);
+									await slack.updateMessage(event.channel, overflowMessageTs, overflowDisplayText);
 								} catch {
-									// If update fails, post new message
-									overflowMessageTs = await slack.postInThread(event.channel, replyTs, text);
+									// If update fails, post new overflow message (reset accumulation)
+									overflowAccumulatedText = text;
+									const freshDisplay = isWorking ? text + workingIndicator : text;
+									overflowMessageTs = await slack.postInThread(event.channel, replyTs, freshDisplay);
 									threadMessageTs.push(overflowMessageTs);
 								}
 							} else {
-								// Even the single new text is too big for update, post as new thread message
-								overflowMessageTs = await slack.postInThread(event.channel, replyTs, text);
+								// Overflow message itself too large — start a new overflow message
+								overflowAccumulatedText = text;
+								const freshDisplay = isWorking ? text + workingIndicator : text;
+								overflowMessageTs = await slack.postInThread(event.channel, replyTs, freshDisplay);
 								threadMessageTs.push(overflowMessageTs);
 							}
 						} else {
 							// First overflow — post as new thread message
-							overflowMessageTs = await slack.postInThread(event.channel, replyTs, text);
+							overflowMessageTs = await slack.postInThread(event.channel, replyTs, overflowDisplayText);
 							threadMessageTs.push(overflowMessageTs);
 						}
 					}
@@ -417,6 +428,12 @@ function createSlackContext(
 					if (messageTs) {
 						const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 						await slack.updateMessage(event.channel, messageTs, displayText);
+					}
+					if (overflowMessageTs && overflowAccumulatedText) {
+						const overflowDisplayText = isWorking
+							? overflowAccumulatedText + workingIndicator
+							: overflowAccumulatedText;
+						await slack.updateMessage(event.channel, overflowMessageTs, overflowDisplayText);
 					}
 				})
 				.catch((err) => {

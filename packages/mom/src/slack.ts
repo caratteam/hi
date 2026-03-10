@@ -626,42 +626,6 @@ export class SlackBot {
 					});
 				}
 			}
-
-			// Mention watch: detect when someone mentions an admin user in a channel
-			if (!isDM && this.userDmMap.size > 0 && e.text) {
-				for (const [watchedUserId, dmChannelId] of this.userDmMap) {
-					if (e.text.includes(`<@${watchedUserId}>`) && e.user !== watchedUserId) {
-						const sender = this.users.get(e.user);
-						const channel = this.channels.get(e.channel);
-						const senderName = sender?.displayName || sender?.userName || e.user;
-						const channelName = channel?.name || e.channel;
-
-						// Build Slack message permalink
-						const tsForLink = e.ts.replace(".", "");
-						const threadParam = e.thread_ts ? `&thread_ts=${e.thread_ts}&cid=${e.channel}` : "";
-						const permalink = `https://carat-team.slack.com/archives/${e.channel}/p${tsForLink}${threadParam}`;
-
-						const alertText =
-							`[MENTION-ALERT] #${channelName}에서 ${senderName}님이 멘션했습니다.\n` +
-							`링크: ${permalink}\n` +
-							`원문: ${e.text}`;
-
-						log.logInfo(
-							`[mention-watch] Detected mention of ${watchedUserId} in #${channelName} by ${senderName}`,
-						);
-
-						// Enqueue as synthetic event to the admin user's DM channel
-						const syntheticEvent: SlackEvent = {
-							type: "dm",
-							channel: dmChannelId,
-							user: "EVENT",
-							text: alertText,
-							ts: Date.now().toString(),
-						};
-						this.enqueueEvent(syntheticEvent);
-					}
-				}
-			}
 		});
 	}
 

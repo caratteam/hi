@@ -225,8 +225,9 @@ Run `npm install` in the extension directory, then imports from `node_modules/` 
 ### Lifecycle Overview
 
 ```
-pi starts
+pi starts (CLI only)
   │
+  ├─► session_directory (CLI startup only, no ctx)
   └─► session_start
       │
       ▼
@@ -243,6 +244,7 @@ user sends prompt ────────────────────�
   │   │                                            │       │
   │   ├─► turn_start                               │       │
   │   ├─► context (can modify messages)            │       │
+  │   ├─► before_provider_request (can inspect or replace payload)
   │   │                                            │       │
   │   │   LLM responds, may call tools:            │       │
   │   │     ├─► tool_call (can block)              │       │
@@ -283,6 +285,26 @@ exit (Ctrl+C, Ctrl+D)
 ### Session Events
 
 See [session.md](session.md) for session storage internals and the SessionManager API.
+
+#### session_directory
+
+Fired by the `pi` CLI during startup session resolution, before the initial session manager is created.
+
+This event is:
+- CLI-only. It is not emitted in SDK mode.
+- Startup-only. It is not emitted for later interactive `/new` or `/resume` actions.
+- Bypassed when `--session-dir` is provided.
+- Special-cased to receive no `ctx` argument.
+
+If multiple extensions return `sessionDir`, the last one wins.
+
+```typescript
+pi.on("session_directory", async (event) => {
+  return {
+    sessionDir: `/tmp/pi-sessions/${encodeURIComponent(event.cwd)}`,
+  };
+});
+```
 
 #### session_start
 
@@ -489,6 +511,21 @@ pi.on("context", async (event, ctx) => {
 });
 ```
 
+#### before_provider_request
+
+Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. Returning `undefined` keeps the payload unchanged. Returning any other value replaces the payload for later handlers and for the actual request.
+
+```typescript
+pi.on("before_provider_request", (event, ctx) => {
+  console.log(JSON.stringify(event.payload, null, 2));
+
+  // Optional: replace payload
+  // return { ...event.payload, temperature: 0 };
+});
+```
+
+This is mainly useful for debugging provider serialization and cache behavior.
+
 ### Model Events
 
 #### model_select
@@ -658,7 +695,9 @@ Transforms chain across handlers. See [input-transform.ts](../examples/extension
 
 ## ExtensionContext
 
-Every handler receives `ctx: ExtensionContext`:
+All handlers except `session_directory` receive `ctx: ExtensionContext`.
+
+`session_directory` is a CLI startup hook and receives only the event.
 
 ### ctx.ui
 
@@ -880,6 +919,14 @@ Subscribe to events. See [Events](#events) for event types and return values.
 
 Register a custom tool callable by the LLM. See [Custom Tools](#custom-tools) for full details.
 
+`pi.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `pi.getAllTools()` and are callable by the LLM without `/reload`.
+
+Use `pi.setActiveTools()` to enable or disable tools (including dynamically added tools) at runtime.
+
+Use `promptSnippet` to customize that tool's one-line entry in `Available tools`, and `promptGuidelines` to append tool-specific bullets to the default `Guidelines` section when the tool is active.
+
+See [dynamic-tools.ts](../examples/extensions/dynamic-tools.ts) for a full example.
+
 ```typescript
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
@@ -888,6 +935,8 @@ pi.registerTool({
   name: "my_tool",
   label: "My Tool",
   description: "What this tool does",
+  promptSnippet: "Summarize or transform text according to action",
+  promptGuidelines: ["Use this tool when the user asks to summarize previously generated text."],
   parameters: Type.Object({
     action: StringEnum(["list", "add"] as const),
     text: Type.Optional(Type.String()),
@@ -1116,7 +1165,7 @@ const result = await pi.exec("git", ["status"], { signal, timeout: 5000 });
 
 ### pi.getActiveTools() / pi.getAllTools() / pi.setActiveTools(names)
 
-Manage active tools.
+Manage active tools. This works for both built-in tools and dynamically registered tools.
 
 ```typescript
 const active = pi.getActiveTools();  // ["read", "bash", "edit", "write"]
@@ -1276,6 +1325,10 @@ export default function (pi: ExtensionAPI) {
 
 Register tools the LLM can call via `pi.registerTool()`. Tools appear in the system prompt and can have custom rendering.
 
+Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, pi falls back to `description`.
+
+Use `promptGuidelines` to add tool-specific bullets to the default system prompt `Guidelines` section. These bullets are included only while the tool is active (for example, after `pi.setActiveTools([...])`).
+
 Note: Some models are idiots and include the @ prefix in tool path arguments. Built-in tools strip a leading @ before resolving paths. If your custom tool accepts a path, normalize a leading @ as well.
 
 ### Tool Definition
@@ -1289,6 +1342,10 @@ pi.registerTool({
   name: "my_tool",
   label: "My Tool",
   description: "What this tool does (shown to LLM)",
+  promptSnippet: "List or add items in the project todo list",
+  promptGuidelines: [
+    "Use this tool for todo planning instead of direct file edits when the user asks for a task list."
+  ],
   parameters: Type.Object({
     action: StringEnum(["list", "add"] as const),  // Use StringEnum for Google compatibility
     text: Type.Optional(Type.String()),
@@ -1320,6 +1377,18 @@ pi.registerTool({
   renderCall(args, theme) { ... },
   renderResult(result, options, theme) { ... },
 });
+```
+
+**Signaling errors:** To mark a tool execution as failed (sets `isError: true` on the result and reports it to the LLM), throw an error from `execute`. Returning a value never sets the error flag regardless of what properties you include in the return object.
+
+```typescript
+// Correct: throw to signal an error
+async execute(toolCallId, params) {
+  if (!isValid(params.input)) {
+    throw new Error(`Invalid input: ${params.input}`);
+  }
+  return { content: [{ type: "text", text: "OK" }], details: {} };
+}
 ```
 
 **Important:** Use `StringEnum` from `@mariozechner/pi-ai` for string enums. `Type.Union`/`Type.Literal` doesn't work with Google's API.
@@ -1862,7 +1931,7 @@ const highlighted = highlightCode(code, lang, theme);
 
 - Extension errors are logged, agent continues
 - `tool_call` errors block the tool (fail-safe)
-- Tool `execute` errors are reported to the LLM with `isError: true`
+- Tool `execute` errors must be signaled by throwing; the thrown error is caught, reported to the LLM with `isError: true`, and execution continues
 
 ## Mode Behavior
 
@@ -1886,6 +1955,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `question.ts` | Tool with user interaction | `registerTool`, `ui.select` |
 | `questionnaire.ts` | Multi-step wizard tool | `registerTool`, `ui.custom` |
 | `todo.ts` | Stateful tool with persistence | `registerTool`, `appendEntry`, `renderResult`, session events |
+| `dynamic-tools.ts` | Register tools after startup and during commands | `registerTool`, `session_start`, `registerCommand` |
 | `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
 | `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
 | **Commands** |||
@@ -1903,6 +1973,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `dirty-repo-guard.ts` | Warn on dirty git repo | `on("session_before_*")`, `exec` |
 | `input-transform.ts` | Transform user input | `on("input")` |
 | `model-status.ts` | React to model changes | `on("model_select")`, `setStatus` |
+| `provider-payload.ts` | Inspect or patch provider payloads | `on("before_provider_request")` |
 | `system-prompt-header.ts` | Display system prompt info | `on("agent_start")`, `getSystemPrompt` |
 | `claude-rules.ts` | Load rules from files | `on("session_start")`, `on("before_agent_start")` |
 | `file-trigger.ts` | File watcher triggers messages | `sendMessage` |

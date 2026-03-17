@@ -159,6 +159,7 @@ The `api` field determines which streaming implementation is used:
 | `openai-responses` | OpenAI Responses API |
 | `azure-openai-responses` | Azure OpenAI Responses API |
 | `openai-codex-responses` | OpenAI Codex Responses API |
+| `mistral-conversations` | Mistral SDK Conversations/Chat streaming |
 | `google-generative-ai` | Google Generative AI API |
 | `google-gemini-cli` | Google Cloud Code Assist API |
 | `google-vertex` | Google Vertex AI API |
@@ -172,14 +173,24 @@ models: [{
   // ...
   compat: {
     supportsDeveloperRole: false,      // use "system" instead of "developer"
-    supportsReasoningEffort: false,    // disable reasoning_effort param
-    maxTokensField: "max_tokens",      // instead of "max_completion_tokens"
-    requiresToolResultName: true,      // tool results need name field
-    requiresMistralToolIds: true       // tool IDs must be 9 alphanumeric chars
-    thinkingFormat: "qwen"             // uses enable_thinking: true
-  }
-}]
+    supportsReasoningEffort: true,
+    reasoningEffortMap: {              // map pi-ai levels to provider values
+      minimal: "default",
+      low: "default",
+      medium: "default",
+      high: "default",
+      xhigh: "default"
+    },
+      maxTokensField: "max_tokens",      // instead of "max_completion_tokens"
+      requiresToolResultName: true,      // tool results need name field
+      thinkingFormat: "qwen"             // uses enable_thinking: true
+    }
+  }]
 ```
+
+> Migration note: Mistral moved from `openai-completions` to `mistral-conversations`.
+> Use `mistral-conversations` for native Mistral models.
+> If you intentionally route Mistral-compatible/custom endpoints through `openai-completions`, set `compat` flags explicitly as needed.
 
 ### Auth Header
 
@@ -294,6 +305,7 @@ For providers with non-standard APIs, implement `streamSimple`. Study the existi
 
 **Reference implementations:**
 - [anthropic.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/anthropic.ts) - Anthropic Messages API
+- [mistral.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/mistral.ts) - Mistral Conversations API
 - [openai-completions.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/openai-completions.ts) - OpenAI Chat Completions
 - [openai-responses.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/openai-responses.ts) - OpenAI Responses API
 - [google.ts](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/google.ts) - Google Generative AI
@@ -568,12 +580,12 @@ interface ProviderModelConfig {
     supportsStore?: boolean;
     supportsDeveloperRole?: boolean;
     supportsReasoningEffort?: boolean;
+    reasoningEffortMap?: Partial<Record<"minimal" | "low" | "medium" | "high" | "xhigh", string>>;
     supportsUsageInStreaming?: boolean;
     maxTokensField?: "max_completion_tokens" | "max_tokens";
     requiresToolResultName?: boolean;
     requiresAssistantAfterToolResult?: boolean;
     requiresThinkingAsText?: boolean;
-    requiresMistralToolIds?: boolean;
     thinkingFormat?: "openai" | "zai" | "qwen";
   };
 }

@@ -138,21 +138,6 @@ function getMemory(channelDir: string): string {
 	return "(no working memory yet)";
 }
 
-function getLessons(channelDir: string): string {
-	const lessonsPath = join(channelDir, "..", "lessons.md");
-	if (existsSync(lessonsPath)) {
-		try {
-			const content = readFileSync(lessonsPath, "utf-8").trim();
-			if (content) {
-				return content;
-			}
-		} catch (error) {
-			log.logWarning("Failed to read lessons file", `${lessonsPath}: ${error}`);
-		}
-	}
-	return "";
-}
-
 function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
 	// channelDir is the host path (e.g., /Users/.../data/C0A34FL8PMH)
 	// hostWorkspacePath is the parent directory on host
@@ -182,7 +167,6 @@ function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
 	memory: string,
-	lessons: string,
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
 	users: UserInfo[],
@@ -325,19 +309,7 @@ ${memory}
 ### IMPORTANT: Record Decisions Immediately
 When a new plan, decision, TODO, or phase emerges during conversation (e.g., "we should add recovery mechanism", "let's do Phase 5 for X"), do NOT just acknowledge it verbally. Immediately write it to the relevant skill file (SKILL.md, ARCHITECTURE.md) in that same turn. "I'll remember" is NOT recording — only writing to a file counts.
 
-${
-	lessons
-		? `
-## Lessons Learned
-Past mistakes and proven solutions. Check here BEFORE attempting any approach.
-Write to \`${workspacePath}/lessons.md\` when you discover a new pattern.
 
-Recording policy: When you try something that fails and then succeed by changing your approach, ALWAYS record the lesson unless the exact pattern is already in this file. "I didn't know" or "it was obvious" are NOT reasons to skip — the whole point is to know next time. Examples: wrong file path → right path, query too large → smaller range, wrong syntax → correct syntax.
-
-${lessons}
-`
-		: ""
-}
 ## Environment Setup
 ${workspacePath}/setup.sh runs automatically on container creation (via docker.sh).
 When you install packages, change config, or modify the environment, add the command to setup.sh so it persists across container rebuilds.
@@ -753,9 +725,8 @@ function createRunner(
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
-	const lessons = getLessons(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, lessons, sandboxConfig, [], [], skills);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
 
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
@@ -907,8 +878,8 @@ function createRunner(
 						})
 						.join("\n");
 					const successArgs = pending?.args ? JSON.stringify(pending.args).substring(0, 300) : "(no args)";
-					const reflectionSteer = `[SYSTEM: LESSON REQUIRED]
-You failed ${state.toolErrors.length} time(s) then succeeded. This is a learning opportunity.
+					const reflectionSteer = `[SYSTEM: REFLECTION]
+You failed ${state.toolErrors.length} time(s) then succeeded.
 
 Failed attempts:
 ${errorSummary}
@@ -916,22 +887,7 @@ ${errorSummary}
 Successful attempt:
 ${agentEvent.toolName}(${successArgs})
 
-You MUST record a lesson. The ONLY exception is if you changed absolutely nothing between the failed and successful calls (e.g., a transient network error that resolved on retry).
-
-If the path changed → record it (e.g., "X is at /workspace/X, not /X").
-If the query/command changed → record it (e.g., "table Y needs smaller date ranges").
-If the syntax changed → record it (e.g., "use CAST() not :: in asyncpg").
-If a parameter changed → record it.
-
-Do NOT rationalize skipping. "I didn't know the first time" is exactly WHY you record it — so next time you DO know.
-
-Append to /workspace/lessons.md:
-### [Short title]
-- WRONG: [what failed — be specific]
-- RIGHT: [what works — be specific]
-- Context: [when this applies]
-
-Then output "[RESUME]" and continue your task.`;
+Briefly note what went wrong and continue your task.`;
 
 					const errorCount = state.toolErrors.length;
 					state.toolErrors = []; // Reset so we don't re-trigger
@@ -1134,13 +1090,11 @@ Then output "[RESUME]" and continue your task.`;
 
 			// Update system prompt with fresh memory, channel/user info, and skills
 			const memory = getMemory(channelDir);
-			const lessons = getLessons(channelDir);
 			const skills = loadMomSkills(channelDir, workspacePath);
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
 				memory,
-				lessons,
 				sandboxConfig,
 				ctx.channels,
 				ctx.users,

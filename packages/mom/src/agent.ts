@@ -793,7 +793,6 @@ function createRunner(
 			enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
 		} | null;
 		pendingTools: Map<string, { toolName: string; args: unknown; startTime: number }>;
-		toolErrors: Array<{ toolName: string; args: unknown; error: string }>;
 		totalUsage: {
 			input: number;
 			output: number;
@@ -808,7 +807,6 @@ function createRunner(
 		logCtx: null,
 		queue: null,
 		pendingTools: new Map(),
-		toolErrors: [],
 		totalUsage: {
 			input: 0,
 			output: 0,
@@ -855,49 +853,8 @@ function createRunner(
 
 			if (agentEvent.isError) {
 				log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
-				// "Skipped due to queued user message" is a system-level skip, not an agent mistake.
-				// Don't count it as a tool error — it would trigger cascading SYSTEM LESSON injections
-				// where each lesson recording causes another skip, creating an infinite loop.
-				if (!resultStr.includes("Skipped due to queued user message")) {
-					state.toolErrors.push({
-						toolName: agentEvent.toolName,
-						args: pending?.args,
-						error: resultStr.substring(0, 500),
-					});
-				}
 			} else {
 				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
-
-				// Mid-run reflection: if there were errors but this tool succeeded,
-				// inject a steering message to reflect on what went wrong
-				if (state.toolErrors.length > 0) {
-					const errorSummary = state.toolErrors
-						.map((e, i) => {
-							const argsStr = e.args ? JSON.stringify(e.args).substring(0, 300) : "(no args)";
-							return `${i + 1}. ${e.toolName}(${argsStr}): ${e.error}`;
-						})
-						.join("\n");
-					const successArgs = pending?.args ? JSON.stringify(pending.args).substring(0, 300) : "(no args)";
-					const reflectionSteer = `[SYSTEM: REFLECTION]
-You failed ${state.toolErrors.length} time(s) then succeeded.
-
-Failed attempts:
-${errorSummary}
-
-Successful attempt:
-${agentEvent.toolName}(${successArgs})
-
-Briefly note what went wrong and continue your task.`;
-
-					const errorCount = state.toolErrors.length;
-					state.toolErrors = []; // Reset so we don't re-trigger
-					log.logInfo(`[${logCtx.channelId}] Injecting mid-run reflection steering (${errorCount} errors)`);
-					session.agent.steer({
-						role: "user",
-						content: [{ type: "text", text: reflectionSteer }],
-						timestamp: Date.now(),
-					});
-				}
 			}
 
 			if (agentEvent.isError) {
@@ -1128,7 +1085,6 @@ Briefly note what went wrong and continue your task.`;
 				channelName: ctx.channelName,
 			};
 			runState.pendingTools.clear();
-			runState.toolErrors = [];
 			runState.totalUsage = {
 				input: 0,
 				output: 0,

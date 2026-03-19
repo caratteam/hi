@@ -185,11 +185,28 @@ export interface MomSettings {
 	retry?: Partial<MomRetrySettings>;
 }
 
+/**
+ * Baseline defaults used when no contextWindow is known.
+ * When contextWindow IS known, reserveTokens and keepRecentTokens are
+ * computed as a percentage of the window to keep compaction triggers
+ * at a consistent context-usage ratio regardless of model size.
+ *
+ * Rationale (context rot research):
+ *   - Chroma Research (2025): performance degrades non-linearly with input length
+ *   - Anthropic docs: "as token count grows, accuracy and recall degrade"
+ *   - 16k reserve on a 200k model = 92% fill before compaction → too late
+ *   - 30% reserve → compaction at 70% fill, similar to 16k/50k ratio
+ */
 const DEFAULT_COMPACTION: MomCompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
 };
+
+/** Reserve 30% of context window → compaction triggers at 70% fill */
+const RESERVE_TOKENS_RATIO = 0.3;
+/** Keep 15% of context window as recent tokens after compaction */
+const KEEP_RECENT_TOKENS_RATIO = 0.15;
 
 const DEFAULT_RETRY: MomRetrySettings = {
 	enabled: true,
@@ -204,10 +221,20 @@ const DEFAULT_RETRY: MomRetrySettings = {
 export class MomSettingsManager {
 	private settingsPath: string;
 	private settings: MomSettings;
+	private contextWindow = 0;
 
 	constructor(workspaceDir: string) {
 		this.settingsPath = join(workspaceDir, "settings.json");
 		this.settings = this.load();
+	}
+
+	/**
+	 * Set the current model's context window size.
+	 * Called when the model is determined at run start.
+	 * Enables dynamic ratio-based compaction settings.
+	 */
+	setContextWindow(contextWindow: number): void {
+		this.contextWindow = contextWindow;
 	}
 
 	private load(): MomSettings {
@@ -236,9 +263,19 @@ export class MomSettingsManager {
 	}
 
 	getCompactionSettings(): MomCompactionSettings {
+		const explicit = this.settings.compaction ?? {};
+		// If contextWindow is known, compute ratio-based defaults.
+		// Explicit values in settings.json always take precedence.
+		if (this.contextWindow > 0) {
+			return {
+				enabled: explicit.enabled ?? DEFAULT_COMPACTION.enabled,
+				reserveTokens: explicit.reserveTokens ?? Math.round(this.contextWindow * RESERVE_TOKENS_RATIO),
+				keepRecentTokens: explicit.keepRecentTokens ?? Math.round(this.contextWindow * KEEP_RECENT_TOKENS_RATIO),
+			};
+		}
 		return {
 			...DEFAULT_COMPACTION,
-			...this.settings.compaction,
+			...explicit,
 		};
 	}
 
@@ -327,7 +364,8 @@ export class MomSettingsManager {
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number } {
-		return { reserveTokens: 16384 };
+		const reserveTokens = this.contextWindow > 0 ? Math.round(this.contextWindow * RESERVE_TOKENS_RATIO) : 16384;
+		return { reserveTokens };
 	}
 
 	getTheme(): string | undefined {

@@ -893,6 +893,12 @@ function createRunner(
 				}
 			}
 
+			// Inform settings manager of the model's context window so
+			// compaction thresholds scale proportionally to context size.
+			if (actualModel.contextWindow) {
+				settingsManager.setContextWindow(actualModel.contextWindow);
+			}
+
 			// Set up file upload function for this run's context
 			currentUploadFn = async (filePath: string, title?: string) => {
 				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId);

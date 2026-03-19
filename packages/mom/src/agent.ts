@@ -17,13 +17,7 @@ import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-import {
-	BASE64_STRIP_THRESHOLD,
-	DEFAULT_CONTEXT_WINDOW,
-	FULL_CONTEXT_RECENT,
-	SLACK_MAX_TEXT,
-	TRUNCATE_THRESHOLD,
-} from "./constants.js";
+import { BASE64_STRIP_THRESHOLD, DEFAULT_CONTEXT_WINDOW, SLACK_MAX_TEXT } from "./constants.js";
 import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
@@ -506,103 +500,6 @@ function sanitizeToolPairs(messages: any[], log: any, channelId: string, threadT
 }
 
 /**
- * Truncate large tool results in older context messages to reduce context bloat.
- *
- * Keeps the most recent FULL_CONTEXT_RECENT messages at full size.
- * For older messages, if a toolResult's text content exceeds TRUNCATE_THRESHOLD bytes,
- * replaces it with a summary containing:
- * - Original size and line count
- * - First 5 lines as preview
- * - The tool name and arguments from the matching toolCall
- * - Instructions for retrieving the full content from the context file
- *
- * The original content is preserved in the context file (not modified).
- */
-function truncateLargeToolResults(
-	messages: any[],
-	contextFile: string,
-	log: any,
-	channelId: string,
-	threadTs: string,
-): any[] {
-	if (messages.length <= FULL_CONTEXT_RECENT) return messages;
-
-	// Build a map of toolCallId -> toolCall args from assistant messages
-	const toolCallArgsMap = new Map<string, { name: string; args: Record<string, unknown> }>();
-	for (const msg of messages) {
-		if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			for (const block of msg.content) {
-				if (block.type === "toolCall" && block.id) {
-					toolCallArgsMap.set(block.id, { name: block.name, args: block.arguments || {} });
-				}
-			}
-		}
-	}
-
-	// Only process messages outside the recent window
-	const cutoff = messages.length - FULL_CONTEXT_RECENT;
-	let truncatedCount = 0;
-	let savedBytes = 0;
-
-	const result = messages.map((msg, idx) => {
-		if (idx >= cutoff) return msg; // Keep recent messages full
-		if (msg.role !== "toolResult") return msg;
-
-		const content = msg.content;
-		if (!Array.isArray(content)) return msg;
-
-		let needsTruncation = false;
-		for (const part of content) {
-			if (part.type === "text" && part.text && part.text.length > TRUNCATE_THRESHOLD) {
-				needsTruncation = true;
-				break;
-			}
-		}
-		if (!needsTruncation) return msg;
-
-		// Build truncated content
-		const newContent = content.map((part: any) => {
-			if (part.type !== "text" || !part.text || part.text.length <= TRUNCATE_THRESHOLD) return part;
-
-			const originalText = part.text;
-			const originalBytes = originalText.length;
-			const originalLines = originalText.split("\n");
-			const lineCount = originalLines.length;
-			const preview = originalLines.slice(0, 5).join("\n");
-
-			// Get tool call info for context
-			const toolCallInfo = msg.toolCallId ? toolCallArgsMap.get(msg.toolCallId) : undefined;
-			const toolName = msg.toolName || toolCallInfo?.name || "unknown";
-			const toolArgs = toolCallInfo?.args || {};
-			const label = (toolArgs as any).label || "";
-
-			// Build summary with retrieval instructions
-			let summary = `[Truncated toolResult: ${toolName}`;
-			if (label) summary += ` — ${label}`;
-			summary += ` | ${Math.round(originalBytes / 1024)}KB, ${lineCount} lines]\n`;
-			summary += `--- preview (first 5 lines) ---\n${preview}\n--- end preview ---\n`;
-			summary += `[Full content preserved in context file. To retrieve:\n`;
-			summary += `  grep '${msg.toolCallId}' ${contextFile} | jq -r '.message.content[0].text']`;
-
-			savedBytes += originalBytes - summary.length;
-			truncatedCount++;
-
-			return { type: "text", text: summary };
-		});
-
-		return { ...msg, content: newContent };
-	});
-
-	if (truncatedCount > 0) {
-		log.logInfo(
-			`[${channelId}:${threadTs}] Truncated ${truncatedCount} large tool result(s), saved ~${Math.round(savedBytes / 1024)}KB`,
-		);
-	}
-
-	return result;
-}
-
-/**
  * Apply monkey-patch to SessionManager._persist to strip large binary data.
  * Without this, reading images/videos via the "read" tool writes megabytes of base64
  * into context files, which can blow up the context on reload.
@@ -963,11 +860,8 @@ function createRunner(
 					log.logInfo(`[${channelId}:${threadTs}] Stripped ${strippedCount} large data block(s) from context`);
 				}
 
-				// Truncate large tool results in older messages (keeps recent ones full)
-				const messages = truncateLargeToolResults(reloadedSession.messages, contextFile, log, channelId, threadTs);
-
-				threadAgent.replaceMessages(messages);
-				log.logInfo(`[${channelId}:${threadTs}] Loaded ${messages.length} messages from context`);
+				threadAgent.replaceMessages(reloadedSession.messages);
+				log.logInfo(`[${channelId}:${threadTs}] Loaded ${reloadedSession.messages.length} messages from context`);
 			} else {
 				// New thread - start fresh
 				threadAgent.replaceMessages([]);

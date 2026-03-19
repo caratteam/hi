@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent, type AgentMessage } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent, type UserMessage } from "@mariozechner/pi-ai";
+import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	type AgentSessionEvent,
@@ -24,7 +24,7 @@ import {
 	SLACK_MAX_TEXT,
 	TRUNCATE_THRESHOLD,
 } from "./constants.js";
-import { getLogMessages, MomSettingsManager } from "./context.js";
+import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
@@ -454,9 +454,6 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 
 /** Additional AWS env vars needed for Bedrock authentication in sandbox */
 const AWS_ENV_KEYS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"];
-
-/** Maximum number of messages to keep from context file when loading */
-const MAX_CONTEXT_MESSAGES = 20;
 
 /**
  * Sanitize toolCall/toolResult pairs in a message array.
@@ -961,7 +958,15 @@ function createRunner(
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
 
-			// Reload messages from thread's context file
+			// Sync messages from log.jsonl that arrived while we were offline or busy
+			// These are permanently appended to SessionManager (and thus context.jsonl),
+			// so auto-compaction handles context growth naturally.
+			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, threadTs, ctx.message.ts);
+			if (syncedCount > 0) {
+				log.logInfo(`[${channelId}:${threadTs}] Synced ${syncedCount} messages from log.jsonl`);
+			}
+
+			// Reload messages from thread's context file (picks up synced messages too)
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
 				// Strip large binary data from historical messages
@@ -986,60 +991,11 @@ function createRunner(
 					log.logInfo(`[${channelId}:${threadTs}] Stripped ${strippedCount} large data block(s) from context`);
 				}
 
-				// Step 1: Trim context.jsonl to most recent MAX_CONTEXT_MESSAGES
-				const messages = reloadedSession.messages;
-				const contextWasTrimmed = messages.length > MAX_CONTEXT_MESSAGES;
-				let trimmedMessages = contextWasTrimmed ? messages.slice(messages.length - MAX_CONTEXT_MESSAGES) : messages;
-				if (contextWasTrimmed) {
-					log.logInfo(
-						`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`,
-					);
-				}
-
-				// Sanitize tool_use/tool_result pairs after trimming
-				trimmedMessages = sanitizeToolPairs(trimmedMessages, log, channelId, threadTs);
-
 				// Truncate large tool results in older messages (keeps recent ones full)
-				trimmedMessages = truncateLargeToolResults(trimmedMessages, contextFile, log, channelId, threadTs);
+				const messages = truncateLargeToolResults(reloadedSession.messages, contextFile, log, channelId, threadTs);
 
-				// Step 2: Get conversation history from log.jsonl, deduplicated against trimmed context
-				const logMessages = getLogMessages(channelDir, threadTs, ctx.message.ts, trimmedMessages);
-				if (logMessages.length > 0) {
-					log.logInfo(`[${channelId}:${threadTs}] Prepending ${logMessages.length} messages from log.jsonl`);
-				}
-
-				// Step 3: Build final message array
-				// [log truncation notice?] [log messages] [context trim notice?] [trimmed context messages]
-				const finalMessages: any[] = [];
-
-				// Add log messages (conversation history) first
-				if (logMessages.length > 0) {
-					finalMessages.push(...logMessages);
-				}
-
-				// Add context trim notice if context was trimmed
-				if (contextWasTrimmed) {
-					const omitted = messages.length - MAX_CONTEXT_MESSAGES;
-					const contextNotice: UserMessage = {
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: `[... ${omitted}개의 이전 tool 호출/결과 메시지 생략 ...]`,
-							},
-						],
-						timestamp: Date.now(),
-					};
-					finalMessages.push(contextNotice);
-				}
-
-				// Add trimmed context messages
-				finalMessages.push(...trimmedMessages);
-
-				threadAgent.replaceMessages(finalMessages);
-				log.logInfo(
-					`[${channelId}:${threadTs}] Loaded ${finalMessages.length} messages (${logMessages.length} from log + ${trimmedMessages.length} from context)`,
-				);
+				threadAgent.replaceMessages(messages);
+				log.logInfo(`[${channelId}:${threadTs}] Loaded ${messages.length} messages from context`);
 			} else {
 				// New thread - start fresh
 				threadAgent.replaceMessages([]);

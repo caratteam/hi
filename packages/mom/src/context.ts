@@ -29,6 +29,11 @@ interface LogMessage {
 	isBot?: boolean;
 }
 
+/** Maximum number of messages to sync from log.jsonl in one pass.
+ * Prevents overwhelming the context on first sync with a large log file.
+ * Auto-compaction handles growth, but we still cap to avoid a huge initial burst. */
+const MAX_SYNC_MESSAGES = 30;
+
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
@@ -143,8 +148,11 @@ export function syncLogToSessionManager(
 
 	if (newMessages.length === 0) return 0;
 
-	// Sort by timestamp and add to session
+	// Sort by timestamp and keep only the most recent messages
 	newMessages.sort((a, b) => a.timestamp - b.timestamp);
+	if (newMessages.length > MAX_SYNC_MESSAGES) {
+		newMessages.splice(0, newMessages.length - MAX_SYNC_MESSAGES);
+	}
 
 	for (const { message } of newMessages) {
 		sessionManager.appendMessage(message);

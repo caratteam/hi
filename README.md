@@ -17,7 +17,7 @@
 
 > **Looking for the pi coding agent?** See **[packages/coding-agent](packages/coding-agent)** for installation and usage.
 
-Tools for building AI agents and managing LLM deployments.
+Tools for building AI agents and managing LLM deployments!
 
 ## Packages
 

@@ -82,33 +82,6 @@ export async function getAnthropicKey(): Promise<string> {
 	return getProviderApiKey(sharedAuthStorage, "anthropic");
 }
 
-/**
- * Call Bedrock Haiku for lightweight classification tasks.
- * Returns the response text, or fallback on error.
- * Uses AWS credentials from process.env (set via .mom-env).
- */
-export async function callBedrockHaiku(prompt: string, fallback: string): Promise<string> {
-	try {
-		const { BedrockRuntimeClient, ConverseCommand } = await import("@aws-sdk/client-bedrock-runtime");
-		const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
-		const client = new BedrockRuntimeClient({ region });
-		const command = new ConverseCommand({
-			modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-			messages: [{ role: "user", content: [{ text: prompt }] }],
-			inferenceConfig: { maxTokens: 100 },
-		});
-		const response = await client.send(command);
-		const output = response.output;
-		if (output?.message?.content?.[0] && "text" in output.message.content[0]) {
-			return output.message.content[0].text?.trim() || fallback;
-		}
-		return fallback;
-	} catch (err) {
-		log.logWarning("Bedrock Haiku call error", err instanceof Error ? err.message : String(err));
-		return fallback;
-	}
-}
-
 const IMAGE_MIME_TYPES: Record<string, string> = {
 	jpg: "image/jpeg",
 	jpeg: "image/jpeg",

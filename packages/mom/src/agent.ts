@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent, type AgentMessage } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent, type UserMessage } from "@mariozechner/pi-ai";
+import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	type AgentSessionEvent,
@@ -17,14 +17,8 @@ import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-import {
-	BASE64_STRIP_THRESHOLD,
-	DEFAULT_CONTEXT_WINDOW,
-	FULL_CONTEXT_RECENT,
-	SLACK_MAX_TEXT,
-	TRUNCATE_THRESHOLD,
-} from "./constants.js";
-import { getLogMessages, MomSettingsManager } from "./context.js";
+import { BASE64_STRIP_THRESHOLD, DEFAULT_CONTEXT_WINDOW, SLACK_MAX_TEXT } from "./constants.js";
+import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
@@ -82,33 +76,6 @@ export async function getAnthropicKey(): Promise<string> {
 	return getProviderApiKey(sharedAuthStorage, "anthropic");
 }
 
-/**
- * Call Bedrock Haiku for lightweight classification tasks.
- * Returns the response text, or fallback on error.
- * Uses AWS credentials from process.env (set via .mom-env).
- */
-export async function callBedrockHaiku(prompt: string, fallback: string): Promise<string> {
-	try {
-		const { BedrockRuntimeClient, ConverseCommand } = await import("@aws-sdk/client-bedrock-runtime");
-		const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
-		const client = new BedrockRuntimeClient({ region });
-		const command = new ConverseCommand({
-			modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-			messages: [{ role: "user", content: [{ text: prompt }] }],
-			inferenceConfig: { maxTokens: 100 },
-		});
-		const response = await client.send(command);
-		const output = response.output;
-		if (output?.message?.content?.[0] && "text" in output.message.content[0]) {
-			return output.message.content[0].text?.trim() || fallback;
-		}
-		return fallback;
-	} catch (err) {
-		log.logWarning("Bedrock Haiku call error", err instanceof Error ? err.message : String(err));
-		return fallback;
-	}
-}
-
 const IMAGE_MIME_TYPES: Record<string, string> = {
 	jpg: "image/jpeg",
 	jpeg: "image/jpeg",
@@ -136,21 +103,6 @@ function getMemory(channelDir: string): string {
 	}
 
 	return "(no working memory yet)";
-}
-
-function getLessons(channelDir: string): string {
-	const lessonsPath = join(channelDir, "..", "lessons.md");
-	if (existsSync(lessonsPath)) {
-		try {
-			const content = readFileSync(lessonsPath, "utf-8").trim();
-			if (content) {
-				return content;
-			}
-		} catch (error) {
-			log.logWarning("Failed to read lessons file", `${lessonsPath}: ${error}`);
-		}
-	}
-	return "";
 }
 
 function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
@@ -182,7 +134,6 @@ function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
 	memory: string,
-	lessons: string,
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
 	users: UserInfo[],
@@ -325,19 +276,6 @@ ${memory}
 ### IMPORTANT: Record Decisions Immediately
 When a new plan, decision, TODO, or phase emerges during conversation (e.g., "we should add recovery mechanism", "let's do Phase 5 for X"), do NOT just acknowledge it verbally. Immediately write it to the relevant skill file (SKILL.md, ARCHITECTURE.md) in that same turn. "I'll remember" is NOT recording — only writing to a file counts.
 
-${
-	lessons
-		? `
-## Lessons Learned
-Past mistakes and proven solutions. Check here BEFORE attempting any approach.
-Write to \`${workspacePath}/lessons.md\` when you discover a new pattern.
-
-Recording policy: When you try something that fails and then succeed by changing your approach, ALWAYS record the lesson unless the exact pattern is already in this file. "I didn't know" or "it was obvious" are NOT reasons to skip — the whole point is to know next time. Examples: wrong file path → right path, query too large → smaller range, wrong syntax → correct syntax.
-
-${lessons}
-`
-		: ""
-}
 ## Environment Setup
 ${workspacePath}/setup.sh runs automatically on container creation (via docker.sh).
 When you install packages, change config, or modify the environment, add the command to setup.sh so it persists across container rebuilds.
@@ -483,9 +421,6 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 /** Additional AWS env vars needed for Bedrock authentication in sandbox */
 const AWS_ENV_KEYS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"];
 
-/** Maximum number of messages to keep from context file when loading */
-const MAX_CONTEXT_MESSAGES = 20;
-
 /**
  * Sanitize toolCall/toolResult pairs in a message array.
  *
@@ -558,103 +493,6 @@ function sanitizeToolPairs(messages: any[], log: any, channelId: string, threadT
 	if (removedResults > 0 || removedCalls > 0) {
 		log.logInfo(
 			`[${channelId}:${threadTs}] Sanitized tool pairs: removed ${removedResults} orphan toolResult(s), ${removedCalls} orphan toolCall(s)`,
-		);
-	}
-
-	return result;
-}
-
-/**
- * Truncate large tool results in older context messages to reduce context bloat.
- *
- * Keeps the most recent FULL_CONTEXT_RECENT messages at full size.
- * For older messages, if a toolResult's text content exceeds TRUNCATE_THRESHOLD bytes,
- * replaces it with a summary containing:
- * - Original size and line count
- * - First 5 lines as preview
- * - The tool name and arguments from the matching toolCall
- * - Instructions for retrieving the full content from the context file
- *
- * The original content is preserved in the context file (not modified).
- */
-function truncateLargeToolResults(
-	messages: any[],
-	contextFile: string,
-	log: any,
-	channelId: string,
-	threadTs: string,
-): any[] {
-	if (messages.length <= FULL_CONTEXT_RECENT) return messages;
-
-	// Build a map of toolCallId -> toolCall args from assistant messages
-	const toolCallArgsMap = new Map<string, { name: string; args: Record<string, unknown> }>();
-	for (const msg of messages) {
-		if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			for (const block of msg.content) {
-				if (block.type === "toolCall" && block.id) {
-					toolCallArgsMap.set(block.id, { name: block.name, args: block.arguments || {} });
-				}
-			}
-		}
-	}
-
-	// Only process messages outside the recent window
-	const cutoff = messages.length - FULL_CONTEXT_RECENT;
-	let truncatedCount = 0;
-	let savedBytes = 0;
-
-	const result = messages.map((msg, idx) => {
-		if (idx >= cutoff) return msg; // Keep recent messages full
-		if (msg.role !== "toolResult") return msg;
-
-		const content = msg.content;
-		if (!Array.isArray(content)) return msg;
-
-		let needsTruncation = false;
-		for (const part of content) {
-			if (part.type === "text" && part.text && part.text.length > TRUNCATE_THRESHOLD) {
-				needsTruncation = true;
-				break;
-			}
-		}
-		if (!needsTruncation) return msg;
-
-		// Build truncated content
-		const newContent = content.map((part: any) => {
-			if (part.type !== "text" || !part.text || part.text.length <= TRUNCATE_THRESHOLD) return part;
-
-			const originalText = part.text;
-			const originalBytes = originalText.length;
-			const originalLines = originalText.split("\n");
-			const lineCount = originalLines.length;
-			const preview = originalLines.slice(0, 5).join("\n");
-
-			// Get tool call info for context
-			const toolCallInfo = msg.toolCallId ? toolCallArgsMap.get(msg.toolCallId) : undefined;
-			const toolName = msg.toolName || toolCallInfo?.name || "unknown";
-			const toolArgs = toolCallInfo?.args || {};
-			const label = (toolArgs as any).label || "";
-
-			// Build summary with retrieval instructions
-			let summary = `[Truncated toolResult: ${toolName}`;
-			if (label) summary += ` — ${label}`;
-			summary += ` | ${Math.round(originalBytes / 1024)}KB, ${lineCount} lines]\n`;
-			summary += `--- preview (first 5 lines) ---\n${preview}\n--- end preview ---\n`;
-			summary += `[Full content preserved in context file. To retrieve:\n`;
-			summary += `  grep '${msg.toolCallId}' ${contextFile} | jq -r '.message.content[0].text']`;
-
-			savedBytes += originalBytes - summary.length;
-			truncatedCount++;
-
-			return { type: "text", text: summary };
-		});
-
-		return { ...msg, content: newContent };
-	});
-
-	if (truncatedCount > 0) {
-		log.logInfo(
-			`[${channelId}:${threadTs}] Truncated ${truncatedCount} large tool result(s), saved ~${Math.round(savedBytes / 1024)}KB`,
 		);
 	}
 
@@ -753,9 +591,8 @@ function createRunner(
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
-	const lessons = getLessons(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, lessons, sandboxConfig, [], [], skills);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
 
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
@@ -822,7 +659,6 @@ function createRunner(
 			enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
 		} | null;
 		pendingTools: Map<string, { toolName: string; args: unknown; startTime: number }>;
-		toolErrors: Array<{ toolName: string; args: unknown; error: string }>;
 		totalUsage: {
 			input: number;
 			output: number;
@@ -837,7 +673,6 @@ function createRunner(
 		logCtx: null,
 		queue: null,
 		pendingTools: new Map(),
-		toolErrors: [],
 		totalUsage: {
 			input: 0,
 			output: 0,
@@ -884,64 +719,8 @@ function createRunner(
 
 			if (agentEvent.isError) {
 				log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
-				// "Skipped due to queued user message" is a system-level skip, not an agent mistake.
-				// Don't count it as a tool error — it would trigger cascading SYSTEM LESSON injections
-				// where each lesson recording causes another skip, creating an infinite loop.
-				if (!resultStr.includes("Skipped due to queued user message")) {
-					state.toolErrors.push({
-						toolName: agentEvent.toolName,
-						args: pending?.args,
-						error: resultStr.substring(0, 500),
-					});
-				}
 			} else {
 				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
-
-				// Mid-run reflection: if there were errors but this tool succeeded,
-				// inject a steering message to reflect on what went wrong
-				if (state.toolErrors.length > 0) {
-					const errorSummary = state.toolErrors
-						.map((e, i) => {
-							const argsStr = e.args ? JSON.stringify(e.args).substring(0, 300) : "(no args)";
-							return `${i + 1}. ${e.toolName}(${argsStr}): ${e.error}`;
-						})
-						.join("\n");
-					const successArgs = pending?.args ? JSON.stringify(pending.args).substring(0, 300) : "(no args)";
-					const reflectionSteer = `[SYSTEM: LESSON REQUIRED]
-You failed ${state.toolErrors.length} time(s) then succeeded. This is a learning opportunity.
-
-Failed attempts:
-${errorSummary}
-
-Successful attempt:
-${agentEvent.toolName}(${successArgs})
-
-You MUST record a lesson. The ONLY exception is if you changed absolutely nothing between the failed and successful calls (e.g., a transient network error that resolved on retry).
-
-If the path changed → record it (e.g., "X is at /workspace/X, not /X").
-If the query/command changed → record it (e.g., "table Y needs smaller date ranges").
-If the syntax changed → record it (e.g., "use CAST() not :: in asyncpg").
-If a parameter changed → record it.
-
-Do NOT rationalize skipping. "I didn't know the first time" is exactly WHY you record it — so next time you DO know.
-
-Append to /workspace/lessons.md:
-### [Short title]
-- WRONG: [what failed — be specific]
-- RIGHT: [what works — be specific]
-- Context: [when this applies]
-
-Then output "[RESUME]" and continue your task.`;
-
-					const errorCount = state.toolErrors.length;
-					state.toolErrors = []; // Reset so we don't re-trigger
-					log.logInfo(`[${logCtx.channelId}] Injecting mid-run reflection steering (${errorCount} errors)`);
-					session.agent.steer({
-						role: "user",
-						content: [{ type: "text", text: reflectionSteer }],
-						timestamp: Date.now(),
-					});
-				}
 			}
 
 			if (agentEvent.isError) {
@@ -1048,7 +827,15 @@ Then output "[RESUME]" and continue your task.`;
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
 
-			// Reload messages from thread's context file
+			// Sync messages from log.jsonl that arrived while we were offline or busy
+			// These are permanently appended to SessionManager (and thus context.jsonl),
+			// so auto-compaction handles context growth naturally.
+			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, threadTs, ctx.message.ts);
+			if (syncedCount > 0) {
+				log.logInfo(`[${channelId}:${threadTs}] Synced ${syncedCount} messages from log.jsonl`);
+			}
+
+			// Reload messages from thread's context file (picks up synced messages too)
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
 				// Strip large binary data from historical messages
@@ -1073,60 +860,8 @@ Then output "[RESUME]" and continue your task.`;
 					log.logInfo(`[${channelId}:${threadTs}] Stripped ${strippedCount} large data block(s) from context`);
 				}
 
-				// Step 1: Trim context.jsonl to most recent MAX_CONTEXT_MESSAGES
-				const messages = reloadedSession.messages;
-				const contextWasTrimmed = messages.length > MAX_CONTEXT_MESSAGES;
-				let trimmedMessages = contextWasTrimmed ? messages.slice(messages.length - MAX_CONTEXT_MESSAGES) : messages;
-				if (contextWasTrimmed) {
-					log.logInfo(
-						`[${channelId}:${threadTs}] Trimmed context from ${messages.length} to ${trimmedMessages.length} messages`,
-					);
-				}
-
-				// Sanitize tool_use/tool_result pairs after trimming
-				trimmedMessages = sanitizeToolPairs(trimmedMessages, log, channelId, threadTs);
-
-				// Truncate large tool results in older messages (keeps recent ones full)
-				trimmedMessages = truncateLargeToolResults(trimmedMessages, contextFile, log, channelId, threadTs);
-
-				// Step 2: Get conversation history from log.jsonl, deduplicated against trimmed context
-				const logMessages = getLogMessages(channelDir, threadTs, ctx.message.ts, trimmedMessages);
-				if (logMessages.length > 0) {
-					log.logInfo(`[${channelId}:${threadTs}] Prepending ${logMessages.length} messages from log.jsonl`);
-				}
-
-				// Step 3: Build final message array
-				// [log truncation notice?] [log messages] [context trim notice?] [trimmed context messages]
-				const finalMessages: any[] = [];
-
-				// Add log messages (conversation history) first
-				if (logMessages.length > 0) {
-					finalMessages.push(...logMessages);
-				}
-
-				// Add context trim notice if context was trimmed
-				if (contextWasTrimmed) {
-					const omitted = messages.length - MAX_CONTEXT_MESSAGES;
-					const contextNotice: UserMessage = {
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: `[... ${omitted}개의 이전 tool 호출/결과 메시지 생략 ...]`,
-							},
-						],
-						timestamp: Date.now(),
-					};
-					finalMessages.push(contextNotice);
-				}
-
-				// Add trimmed context messages
-				finalMessages.push(...trimmedMessages);
-
-				threadAgent.replaceMessages(finalMessages);
-				log.logInfo(
-					`[${channelId}:${threadTs}] Loaded ${finalMessages.length} messages (${logMessages.length} from log + ${trimmedMessages.length} from context)`,
-				);
+				threadAgent.replaceMessages(reloadedSession.messages);
+				log.logInfo(`[${channelId}:${threadTs}] Loaded ${reloadedSession.messages.length} messages from context`);
 			} else {
 				// New thread - start fresh
 				threadAgent.replaceMessages([]);
@@ -1134,13 +869,11 @@ Then output "[RESUME]" and continue your task.`;
 
 			// Update system prompt with fresh memory, channel/user info, and skills
 			const memory = getMemory(channelDir);
-			const lessons = getLessons(channelDir);
 			const skills = loadMomSkills(channelDir, workspacePath);
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
 				memory,
-				lessons,
 				sandboxConfig,
 				ctx.channels,
 				ctx.users,
@@ -1174,7 +907,6 @@ Then output "[RESUME]" and continue your task.`;
 				channelName: ctx.channelName,
 			};
 			runState.pendingTools.clear();
-			runState.toolErrors = [];
 			runState.totalUsage = {
 				input: 0,
 				output: 0,

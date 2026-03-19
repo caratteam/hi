@@ -17,16 +17,6 @@ export const SLACK_UPDATE_MAX_BYTES = 3800;
 export const SLACK_MSG_TOO_LONG_FALLBACKS = [30000, 20000, 10000, 4000];
 
 // ----------------------------------------------------------------------------
-// Tool result truncation (old context messages)
-// ----------------------------------------------------------------------------
-
-/** Threshold in bytes for truncating old tool results */
-export const TRUNCATE_THRESHOLD = 4096;
-
-/** Number of recent messages to keep at full size (roughly 2 turns of user+assistant+toolResults) */
-export const FULL_CONTEXT_RECENT = 6;
-
-// ----------------------------------------------------------------------------
 // Binary data stripping
 // ----------------------------------------------------------------------------
 

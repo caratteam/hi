@@ -6,20 +6,18 @@
  * - log.jsonl: Human-readable channel history for grep (no tool results)
  *
  * This module provides:
- * - getLogMessages: Reads conversation history from log.jsonl (thread-filtered, deduplicated)
+ * - syncLogToSessionManager: Syncs messages from log.jsonl to SessionManager (thread-filtered, deduplicated)
  * - MomSettingsManager: Simple settings for mom (compaction, retry, model preferences)
  */
 
 import type { UserMessage } from "@mariozechner/pi-ai";
+import type { SessionManager, SessionMessageEntry } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 // ============================================================================
-// Get conversation messages from log.jsonl
+// Sync log.jsonl to SessionManager
 // ============================================================================
-
-/** Maximum number of recent messages to read from log.jsonl */
-const MAX_SYNC_MESSAGES = 20;
 
 interface LogMessage {
 	date?: string;
@@ -31,137 +29,136 @@ interface LogMessage {
 	isBot?: boolean;
 }
 
-/**
- * Extract normalized text content from context messages for deduplication.
- */
-function extractMessageTexts(messages: any[]): { userTexts: Set<string>; assistantTexts: Set<string> } {
-	const userTexts = new Set<string>();
-	const assistantTexts = new Set<string>();
+/** Maximum number of messages to sync from log.jsonl in one pass.
+ * Prevents overwhelming the context on first sync with a large log file.
+ * Auto-compaction handles growth, but we still cap to avoid a huge initial burst. */
+const MAX_SYNC_MESSAGES = 30;
 
-	for (const msg of messages) {
-		const role = msg.role;
-		if (role !== "user" && role !== "assistant") continue;
-		const targetSet = role === "assistant" ? assistantTexts : userTexts;
-		const content = msg.content;
-		if (typeof content === "string") {
-			let normalized = content.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
-			const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
-			if (attachmentsIdx !== -1) normalized = normalized.substring(0, attachmentsIdx);
-			targetSet.add(normalized);
-		} else if (Array.isArray(content)) {
-			for (const part of content) {
-				if (typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part) {
-					let normalized = (part as { type: "text"; text: string }).text;
-					normalized = normalized.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
+/**
+ * Sync user messages from log.jsonl to SessionManager.
+ *
+ * This ensures that messages logged while mom wasn't running (channel chatter,
+ * backfilled messages, messages while busy) are added to the LLM context.
+ * Messages are permanently appended to SessionManager (and thus to context.jsonl),
+ * so auto-compaction handles context growth naturally.
+ *
+ * Thread-aware: only syncs messages belonging to the specified thread.
+ *
+ * @param sessionManager - The SessionManager to sync to
+ * @param channelDir - Path to channel directory containing log.jsonl
+ * @param threadTs - Thread timestamp to filter by (undefined = top-level messages only)
+ * @param excludeSlackTs - Slack timestamp of current message (will be added via prompt(), not sync)
+ * @returns Number of messages synced
+ */
+export function syncLogToSessionManager(
+	sessionManager: SessionManager,
+	channelDir: string,
+	threadTs?: string,
+	excludeSlackTs?: string,
+): number {
+	const logFile = join(channelDir, "log.jsonl");
+
+	if (!existsSync(logFile)) return 0;
+
+	// Build set of existing message content from session for deduplication
+	const existingMessages = new Set<string>();
+	for (const entry of sessionManager.getEntries()) {
+		if (entry.type === "message") {
+			const msgEntry = entry as SessionMessageEntry;
+			const msg = msgEntry.message as { role: string; content?: unknown };
+			if (msg.role === "user" && msg.content !== undefined) {
+				const content = msg.content;
+				if (typeof content === "string") {
+					let normalized = content.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
 					const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
-					if (attachmentsIdx !== -1) normalized = normalized.substring(0, attachmentsIdx);
-					targetSet.add(normalized);
+					if (attachmentsIdx !== -1) {
+						normalized = normalized.substring(0, attachmentsIdx);
+					}
+					existingMessages.add(normalized);
+				} else if (Array.isArray(content)) {
+					for (const part of content) {
+						if (
+							typeof part === "object" &&
+							part !== null &&
+							"type" in part &&
+							part.type === "text" &&
+							"text" in part
+						) {
+							let normalized = (part as { type: "text"; text: string }).text;
+							normalized = normalized.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
+							const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
+							if (attachmentsIdx !== -1) {
+								normalized = normalized.substring(0, attachmentsIdx);
+							}
+							existingMessages.add(normalized);
+						}
+					}
 				}
 			}
 		}
 	}
 
-	return { userTexts, assistantTexts };
-}
-
-/**
- * Read conversation messages from log.jsonl, deduplicated against existing context messages.
- *
- * Returns an array of UserMessage objects (with role "user" for both user and bot messages,
- * since these are injected as conversation history context, not direct assistant responses).
- *
- * Bot messages use [bot/name] prefix, user messages use [name] prefix.
- *
- * @param channelDir - Path to channel directory containing log.jsonl
- * @param threadTs - Thread timestamp to filter by (undefined = top-level messages only)
- * @param excludeSlackTs - Slack timestamp of current message (will be added via prompt(), not sync)
- * @param existingMessages - Already-loaded context messages to check for duplicates
- * @returns Array of messages to prepend to context
- */
-export function getLogMessages(
-	channelDir: string,
-	threadTs: string | undefined,
-	excludeSlackTs: string | undefined,
-	existingMessages: any[],
-): UserMessage[] {
-	const logFile = join(channelDir, "log.jsonl");
-
-	if (!existsSync(logFile)) return [];
-
-	// Build dedup sets from existing context messages
-	const { userTexts: existingUserTexts, assistantTexts: existingAssistantTexts } =
-		extractMessageTexts(existingMessages);
-
-	// Read log.jsonl and filter to matching thread
+	// Read log.jsonl and find user messages not in context, filtered by thread
 	const logContent = readFileSync(logFile, "utf-8");
 	const logLines = logContent.trim().split("\n").filter(Boolean);
 
-	const threadMessages: Array<{ logMsg: LogMessage }> = [];
+	const newMessages: Array<{ timestamp: number; message: UserMessage }> = [];
 
 	for (const line of logLines) {
 		try {
 			const logMsg: LogMessage = JSON.parse(line);
-			if (!logMsg.ts || !logMsg.date) continue;
 
+			const slackTs = logMsg.ts;
+			const date = logMsg.date;
+			if (!slackTs || !date) continue;
+
+			// Thread filtering: only sync messages belonging to this thread
 			if (threadTs) {
 				if (logMsg.thread_ts !== threadTs && logMsg.ts !== threadTs) continue;
 			} else {
+				// Top-level context: skip threaded messages
 				if (logMsg.thread_ts) continue;
 			}
 
-			threadMessages.push({ logMsg });
+			// Skip the current message being processed (will be added via prompt())
+			if (excludeSlackTs && slackTs === excludeSlackTs) continue;
+
+			// Skip bot messages - added through agent flow
+			if (logMsg.isBot) continue;
+
+			// Build the message text as it would appear in context
+			const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
+
+			// Skip if this exact message text is already in context
+			if (existingMessages.has(messageText)) continue;
+
+			const msgTime = new Date(date).getTime() || Date.now();
+			const userMessage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: messageText }],
+				timestamp: msgTime,
+			};
+
+			newMessages.push({ timestamp: msgTime, message: userMessage });
+			existingMessages.add(messageText); // Track to avoid duplicates within this sync
 		} catch {
 			// Skip malformed lines
 		}
 	}
 
-	// Take only the most recent MAX_SYNC_MESSAGES
-	const totalThreadMessages = threadMessages.length;
-	const wasTruncated = totalThreadMessages > MAX_SYNC_MESSAGES;
-	const recentMessages = threadMessages.slice(-MAX_SYNC_MESSAGES);
+	if (newMessages.length === 0) return 0;
 
-	const result: UserMessage[] = [];
-	const seenTexts = new Set<string>(existingUserTexts);
-
-	// If messages were truncated, prepend a notice
-	if (wasTruncated) {
-		const omitted = totalThreadMessages - MAX_SYNC_MESSAGES;
-		const noticeText = `[... ${omitted}개의 이전 메시지 생략. 이전 대화는 log.jsonl을 검색하세요 ...]`;
-		if (!seenTexts.has(noticeText)) {
-			const noticeTime =
-				recentMessages.length > 0
-					? (new Date(recentMessages[0].logMsg.date!).getTime() || Date.now()) - 1
-					: Date.now();
-			result.push({
-				role: "user",
-				content: [{ type: "text", text: noticeText }],
-				timestamp: noticeTime,
-			});
-			seenTexts.add(noticeText);
-		}
+	// Sort by timestamp and keep only the most recent messages
+	newMessages.sort((a, b) => a.timestamp - b.timestamp);
+	if (newMessages.length > MAX_SYNC_MESSAGES) {
+		newMessages.splice(0, newMessages.length - MAX_SYNC_MESSAGES);
 	}
 
-	for (const { logMsg } of recentMessages) {
-		// Skip the current message being processed (will be added via prompt())
-		if (excludeSlackTs && logMsg.ts === excludeSlackTs) continue;
-
-		const name = logMsg.userName || logMsg.user || "unknown";
-		const messageText = logMsg.isBot ? `[bot/${name}]: ${logMsg.text || ""}` : `[${name}]: ${logMsg.text || ""}`;
-
-		// Skip duplicates: check against existing context + already added
-		if (seenTexts.has(messageText) || existingAssistantTexts.has(messageText)) continue;
-		if (logMsg.isBot && existingAssistantTexts.has(logMsg.text || "")) continue;
-
-		const msgTime = new Date(logMsg.date!).getTime() || Date.now();
-		result.push({
-			role: "user",
-			content: [{ type: "text", text: messageText }],
-			timestamp: msgTime,
-		});
-		seenTexts.add(messageText);
+	for (const { message } of newMessages) {
+		sessionManager.appendMessage(message);
 	}
 
-	return result;
+	return newMessages.length;
 }
 
 // ============================================================================

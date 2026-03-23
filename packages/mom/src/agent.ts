@@ -23,7 +23,7 @@ import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
 import type { ChannelStore } from "./store.js";
-import { createMomTools } from "./tools/index.js";
+import { createMomTools, createReadOnlyMomTools } from "./tools/index.js";
 
 // Hardcoded model for now - TODO: make configurable (issue #63)
 const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1");
@@ -579,15 +579,17 @@ function createRunner(
 	// Per-channel upload function, updated each run() with the current ctx
 	let currentUploadFn: ((filePath: string, title?: string) => Promise<void>) | null = null;
 
+	// Upload function wrapper (shared by both tool sets)
+	const uploadWrapper = async (filePath: string, title?: string) => {
+		if (!currentUploadFn) throw new Error("Upload function not configured for this run");
+		await currentUploadFn(filePath, title);
+	};
+
 	// Create tools with access to current user ID and upload function
-	const tools = createMomTools(
-		executor,
-		() => currentUserId,
-		async (filePath: string, title?: string) => {
-			if (!currentUploadFn) throw new Error("Upload function not configured for this run");
-			await currentUploadFn(filePath, title);
-		},
-	);
+	const tools = createMomTools(executor, () => currentUserId, uploadWrapper);
+
+	// Read-only tools for non-admin users (no Write, no Edit, restricted Bash)
+	const readOnlyTools = createReadOnlyMomTools(executor, uploadWrapper);
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
@@ -880,6 +882,23 @@ function createRunner(
 				skills,
 			);
 			threadAgent.setSystemPrompt(systemPrompt);
+
+			// Swap tools based on read-only mode (non-admin users)
+			if (ctx.readOnly) {
+				threadAgent.setTools(readOnlyTools);
+				threadAgent.setSystemPrompt(
+					systemPrompt +
+						"\n\n## READ-ONLY MODE\n" +
+						"This request is from a non-admin user. You are in read-only mode:\n" +
+						"- You can ONLY use Read and Bash (restricted to DB queries and read-only utilities)\n" +
+						"- You CANNOT create/modify files, skills, events, or memory\n" +
+						"- Answer the user's question using existing knowledge and DB queries\n" +
+						"- Be helpful and concise\n",
+				);
+				log.logInfo(`[${channelId}:${threadTs}] Read-only mode: restricted tools`);
+			} else {
+				threadAgent.setTools(tools);
+			}
 
 			// Dynamic model override from settings.json
 			let actualModel = model; // Start with default

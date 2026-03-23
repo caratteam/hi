@@ -69,6 +69,9 @@ export interface SlackEvent {
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
 	/** Processed attachments with local paths (populated after logUserMessage) */
 	attachments?: Attachment[];
+	/** When true, the agent runs in read-only mode (no file writes, limited bash).
+	 *  Set for non-admin users who mention the bot in channels. */
+	readOnly?: boolean;
 }
 
 export interface SlackUser {
@@ -108,6 +111,8 @@ export interface SlackContext {
 	channelName?: string;
 	channels: ChannelInfo[];
 	users: UserInfo[];
+	/** When true, agent runs in read-only mode (no file writes, limited bash) */
+	readOnly?: boolean;
 	respond: (text: string, shouldLog?: boolean) => Promise<void>;
 	replaceMessage: (text: string) => Promise<void>;
 	respondInThread: (text: string, force?: boolean) => Promise<void>;
@@ -451,13 +456,11 @@ export class SlackBot {
 			// Also downloads attachments in background and stores local paths
 			slackEvent.attachments = this.logUserMessage(slackEvent);
 
-			// Only respond to allowed user
-			if (!SlackBot.ADMIN_USER_SET.has(e.user)) {
-				log.logInfo(
-					`[${e.channel}] Ignoring mention from ${this.users.get(e.user)?.userName || e.user} (not admin)`,
-				);
-				ack();
-				return;
+			// Non-admin users: allow with read-only mode (no file writes, limited bash)
+			const isAdmin = SlackBot.ADMIN_USER_SET.has(e.user);
+			if (!isAdmin) {
+				slackEvent.readOnly = true;
+				log.logInfo(`[${e.channel}] Read-only mention from ${this.users.get(e.user)?.userName || e.user}`);
 			}
 
 			// Only trigger processing for messages AFTER startup (not replayed old messages)
@@ -475,19 +478,24 @@ export class SlackBot {
 			// Check for stop command - execute immediately, don't queue!
 			if (slackEvent.text.toLowerCase().trim() === "stop") {
 				if (this.handler.isRunning(e.channel, eventThreadTs)) {
-					this.handler.handleStop(e.channel, this, eventThreadTs);
-				} else {
+					// Only admin can stop
+					if (isAdmin) {
+						this.handler.handleStop(e.channel, this, eventThreadTs);
+					}
+				} else if (isAdmin) {
 					this.postMessage(e.channel, "_Nothing running_");
 				}
 				ack();
 				return;
 			}
 
-			// If already running, steer the agent instead of queueing
+			// If already running, steer the agent instead of queueing (admin only)
 			if (this.handler.isRunning(e.channel, eventThreadTs)) {
-				const user = this.users.get(e.user);
-				this.handler.steerMessage(e.channel, eventThreadTs, user?.userName || e.user, slackEvent.text);
-				this.addReaction(e.channel, e.ts, "zap");
+				if (isAdmin) {
+					const user = this.users.get(e.user);
+					this.handler.steerMessage(e.channel, eventThreadTs, user?.userName || e.user, slackEvent.text);
+					this.addReaction(e.channel, e.ts, "zap");
+				}
 				ack();
 				return;
 			}

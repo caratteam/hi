@@ -48,6 +48,98 @@ interface BashToolDetails {
 	fullOutputPath?: string;
 }
 
+/**
+ * Allowlist of commands for read-only mode.
+ * Only these commands (and their common usage patterns) are permitted.
+ */
+const READONLY_ALLOWED_COMMANDS = [
+	// DB query via skill script
+	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?\/workspace\/skills\/carat-db\/query\.sh\s/,
+	// Basic read-only utilities
+	/^\s*cat\s/,
+	/^\s*grep\s/,
+	/^\s*head\s/,
+	/^\s*tail\s/,
+	/^\s*wc\s/,
+	/^\s*jq\s/,
+	/^\s*date\b/,
+	/^\s*echo\s/,
+	/^\s*ls\s/,
+	/^\s*ls$/,
+	/^\s*find\s/,
+	/^\s*sort\s/,
+	/^\s*uniq\s/,
+	/^\s*cut\s/,
+	/^\s*awk\s/,
+	/^\s*sed\s/,
+	/^\s*diff\s/,
+	/^\s*du\s/,
+	/^\s*df\s/,
+	/^\s*wc\b/,
+	/^\s*file\s/,
+	/^\s*stat\s/,
+	/^\s*pwd$/,
+	/^\s*env$/,
+	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
+];
+
+/**
+ * Check if a command is allowed in read-only mode.
+ * For piped commands (a | b | c), each segment must be allowed.
+ */
+function isReadOnlyAllowed(command: string): boolean {
+	// Split by pipes, but not pipes inside quotes
+	// Simple approach: split by | that is not inside quotes
+	const segments = command.split(/\|/).map((s) => s.trim());
+	for (const segment of segments) {
+		if (!segment) continue;
+		const allowed = READONLY_ALLOWED_COMMANDS.some((pattern) => pattern.test(segment));
+		if (!allowed) return false;
+	}
+	return true;
+}
+
+/**
+ * Create a read-only bash tool that only allows whitelisted commands.
+ * Used for non-admin users who mention the bot in channels.
+ */
+export function createReadOnlyBashTool(executor: Executor): AgentTool<typeof bashSchema> {
+	return {
+		name: "bash",
+		label: "bash",
+		description: `Execute a read-only bash command. Only allows: DB queries via /workspace/skills/carat-db/query.sh, and basic read utilities (cat, grep, head, tail, jq, date, etc.). File writes, package installs, and other modifications are blocked.`,
+		parameters: bashSchema,
+		execute: async (
+			_toolCallId: string,
+			{ command, timeout }: { label: string; command: string; timeout?: number },
+			signal?: AbortSignal,
+		) => {
+			if (!isReadOnlyAllowed(command)) {
+				throw new Error(
+					`Command not allowed in read-only mode. Only DB queries and read-only utilities (cat, grep, head, tail, jq, date, etc.) are permitted.`,
+				);
+			}
+
+			const result = await executor.exec(command, { timeout, signal });
+			let output = "";
+			if (result.stdout) output += result.stdout;
+			if (result.stderr) {
+				if (output) output += "\n";
+				output += result.stderr;
+			}
+
+			const truncation = truncateTail(output);
+			const outputText = truncation.content || "(no output)";
+
+			if (result.code !== 0) {
+				throw new Error(`${outputText}\n\nCommand exited with code ${result.code}`.trim());
+			}
+
+			return { content: [{ type: "text", text: outputText }], details: undefined };
+		},
+	};
+}
+
 export function createBashTool(executor: Executor, getUserId: () => string | undefined): AgentTool<typeof bashSchema> {
 	return {
 		name: "bash",

@@ -243,6 +243,7 @@ function createSlackContext(
 		store: state.store,
 		channels: slack.getAllChannels().map((c) => ({ id: c.id, name: c.name })),
 		users: slack.getAllUsers().map((u) => ({ id: u.id, userName: u.userName, displayName: u.displayName })),
+		readOnly: event.readOnly,
 
 		respond: async (text: string, shouldLog = true) => {
 			let lastError: unknown;

@@ -88,15 +88,28 @@ function getImageMimeType(filename: string): string | undefined {
 	return IMAGE_MIME_TYPES[filename.toLowerCase().split(".").pop() || ""];
 }
 
+const MEMORY_MAX_LINES = 100;
+
 function getMemory(channelDir: string): string {
 	// Workspace-level memory only (no channel-specific memory)
 	const workspaceMemoryPath = join(channelDir, "..", "MEMORY.md");
 	if (existsSync(workspaceMemoryPath)) {
 		try {
 			const content = readFileSync(workspaceMemoryPath, "utf-8").trim();
-			if (content) {
+			if (!content) return "(no working memory yet)";
+
+			const lines = content.split("\n");
+			if (lines.length <= MEMORY_MAX_LINES) {
 				return content;
 			}
+
+			// Truncate and instruct consolidation
+			return (
+				lines.slice(0, MEMORY_MAX_LINES).join("\n") +
+				`\n\n[... truncated — only first ${MEMORY_MAX_LINES} of ${lines.length} lines loaded]\n\n` +
+				`> MEMORY.md has ${lines.length} lines but only the first ${MEMORY_MAX_LINES} are loaded. ` +
+				`Consolidate it now: merge related entries, remove outdated items, and move skill-specific details to skill-memory/<skill-name>.md.`
+			);
 		} catch (error) {
 			log.logWarning("Failed to read workspace memory", `${workspaceMemoryPath}: ${error}`);
 		}
@@ -158,8 +171,23 @@ function buildSystemPrompt(
 - Bash working directory: ${process.cwd()}
 - Be careful with system modifications`;
 
-	return `You are mom, a Slack bot assistant. Be concise. No emojis.
+	// Extract ## Rules section from memory and place it prominently in the prompt.
+	// This ensures behavioral rules get high attention instead of being buried
+	// deep inside the memory content where they lose effectiveness.
+	let memoryRules = "";
+	let memoryWithoutRules = memory;
+	const memorySections = memory.split(/^(?=## )/m);
+	const rulesSection = memorySections.find((s) => s.startsWith("## Rules"));
+	if (rulesSection) {
+		memoryRules = rulesSection.replace(/^## Rules\n/, "").trim();
+		memoryWithoutRules = memorySections
+			.filter((s) => !s.startsWith("## Rules"))
+			.join("")
+			.trim();
+	}
 
+	return `You are mom, a Slack bot assistant. Be concise. No emojis.
+${memoryRules ? `\n## Rules\n${memoryRules}\n` : ""}
 ## Context
 - For current date/time, use: date
 - You have access to previous conversation context including tool results from prior turns.
@@ -208,6 +236,9 @@ Scripts are in: {baseDir}/
 \`\`\`
 
 \`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
+
+### Skill Memory
+When you read a skill's SKILL.md, also read \`${workspacePath}/skill-memory/<skill-name>.md\` if it exists. This contains learned patterns, past decisions, and context specific to that skill.
 
 ### Available Skills
 ${skills.length > 0 ? formatSkillsForPrompt(skills) : "(no skills installed yet)"}
@@ -267,14 +298,19 @@ Immediate and one-shot events auto-delete after triggering. Periodic events pers
 When writing programs that create immediate events (email watchers, webhook handlers, etc.), always debounce. If 50 emails arrive in a minute, don't create 50 immediate events. Instead collect events over a window and create ONE immediate event summarizing what happened, or just signal "new activity, check inbox" rather than per-item events. Or simpler: use a periodic event to check for new items every N minutes instead of immediate events.
 
 ## Memory
-Write to ${workspacePath}/MEMORY.md to persist context across conversations (skills, preferences, project info, ongoing work).
-Update when you learn something important or when asked to remember something.
+Save information worth remembering across sessions. When you write memory, do it in that same turn — "I'll remember" without writing is a failure.
 
-### Current Memory
-${memory}
+**What to save:** user preferences, learned patterns, decisions that affect future tasks. Skip routine actions.
+
+**Where to write:** if a relevant skill exists (check available_skills), write to \`${workspacePath}/skill-memory/<skill-name>.md\`. Use \`${workspacePath}/MEMORY.md\` only when no skill is relevant (e.g., team culture, general rules).
+- \`${workspacePath}/skill-memory/<skill-name>.md\` — skill-specific memory. Read it when you load that skill's SKILL.md.
+- \`${workspacePath}/MEMORY.md\` — auto-loaded every turn (below). Keep it small (<100 lines).
+
+### Current Memory (${workspacePath}/MEMORY.md, auto-loaded)
+${memoryWithoutRules}
 
 ### IMPORTANT: Record Decisions Immediately
-When a new plan, decision, TODO, or phase emerges during conversation (e.g., "we should add recovery mechanism", "let's do Phase 5 for X"), do NOT just acknowledge it verbally. Immediately write it to the relevant skill file (SKILL.md, ARCHITECTURE.md) in that same turn. "I'll remember" is NOT recording — only writing to a file counts.
+When a new plan, decision, TODO, or phase emerges during conversation, do NOT just acknowledge it verbally. Immediately write it to the relevant file (skill-memory, SKILL.md, ARCHITECTURE.md) in that same turn.
 
 ## Environment Setup
 ${workspacePath}/setup.sh runs automatically on container creation (via docker.sh).

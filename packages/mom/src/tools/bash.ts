@@ -57,42 +57,83 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?\/workspace\/skills\/carat-db\/query\.sh\s/,
 	// Mixpanel event query via skill script
 	/^\s*(?:bash\s+)?\/workspace\/skills\/mixpanel\/query\.sh[\s$]/,
+	// Navigation & environment (no side effects)
+	/^\s*cd\b/,
+	/^\s*true$/,
+	/^\s*false$/,
 	// Basic read-only utilities
-	/^\s*cat\s/,
-	/^\s*grep\s/,
-	/^\s*head\s/,
-	/^\s*tail\s/,
-	/^\s*wc\s/,
-	/^\s*jq\s/,
-	/^\s*date\b/,
-	/^\s*echo\s/,
-	/^\s*ls\s/,
-	/^\s*ls$/,
-	/^\s*find\s/,
-	/^\s*sort(\s|$)/,
-	/^\s*uniq(\s|$)/,
-	/^\s*cut\s/,
-	/^\s*awk\s/,
-	/^\s*sed\s/,
-	/^\s*diff\s/,
-	/^\s*du\s/,
-	/^\s*df\s/,
+	/^\s*cat\b/,
+	/^\s*grep\b/,
+	/^\s*head\b/,
+	/^\s*tail\b/,
 	/^\s*wc\b/,
-	/^\s*file\s/,
-	/^\s*stat\s/,
+	/^\s*jq\b/,
+	/^\s*date\b/,
+	/^\s*echo\b/,
+	/^\s*printf\b/,
+	/^\s*ls\b/,
+	/^\s*ls$/,
+	/^\s*find\b/,
+	/^\s*sort\b/,
+	/^\s*uniq\b/,
+	/^\s*cut\b/,
+	/^\s*awk\b/,
+	/^\s*sed\b/,
+	/^\s*diff\b/,
+	/^\s*du\b/,
+	/^\s*df\b/,
+	/^\s*file\b/,
+	/^\s*stat\b/,
 	/^\s*pwd$/,
 	/^\s*env$/,
+	/^\s*tree\b/,
+	/^\s*realpath\b/,
+	/^\s*dirname\b/,
+	/^\s*basename\b/,
+	/^\s*readlink\b/,
+	/^\s*which\b/,
+	/^\s*test\b/,
+	/^\s*\[\s/,
+	// Passthrough wrappers (xargs, time, etc.) — the inner command is also checked
+	/^\s*xargs\b/,
+	/^\s*time\b/,
 	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
 ];
 
 /**
+ * Patterns that indicate file-writing or destructive operations.
+ * Checked against the ENTIRE raw command before allowlist evaluation.
+ */
+const READONLY_BLOCKED_PATTERNS = [
+	/(?:^|[^\\])>/, // redirect stdout (>, >>), but not escaped \>
+	/\btee\b/, // tee writes to files
+	/\bmkdir\b/, // create directories
+	/\btouch\b/, // create files
+	/\brm\b/, // remove files
+	/\bmv\b/, // move/rename files
+	/\bcp\b/, // copy files
+	/\bchmod\b/, // change permissions
+	/\bchown\b/, // change ownership
+	/\bln\b/, // create links
+	/\binstall\b/, // install command
+	/\bdd\b/, // disk dump
+];
+
+/**
  * Check if a command is allowed in read-only mode.
- * For piped commands (a | b | c), each segment must be allowed.
+ * 1. First rejects any command containing write operations (redirects, rm, cp, etc.)
+ * 2. Then splits on |, &&, ;, and || so that "cd /dir && grep foo" is allowed.
+ * Each segment must match the allowlist.
  */
 function isReadOnlyAllowed(command: string): boolean {
-	// Split by pipes, but not pipes inside quotes
-	// Simple approach: split by | that is not inside quotes
-	const segments = command.split(/\|/).map((s) => s.trim());
+	// Block any command that contains write operations
+	for (const pattern of READONLY_BLOCKED_PATTERNS) {
+		if (pattern.test(command)) return false;
+	}
+
+	// Split by |, &&, ||, and ; — these are the common shell combinators.
+	// We split on them all so each sub-command is checked independently.
+	const segments = command.split(/\|{1,2}|&&|;/).map((s) => s.trim());
 	for (const segment of segments) {
 		if (!segment) continue;
 		const allowed = READONLY_ALLOWED_COMMANDS.some((pattern) => pattern.test(segment));

@@ -82,8 +82,6 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*stat\s/,
 	/^\s*pwd$/,
 	/^\s*env$/,
-	// Python one-liners for data analysis (piped from other commands)
-	/^\s*python3\s+-c\s/,
 	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
 ];
 

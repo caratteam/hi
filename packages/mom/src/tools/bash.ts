@@ -55,6 +55,8 @@ interface BashToolDetails {
 const READONLY_ALLOWED_COMMANDS = [
 	// DB query via skill script
 	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?\/workspace\/skills\/carat-db\/query\.sh\s/,
+	// Mixpanel event query via skill script
+	/^\s*(?:bash\s+)?\/workspace\/skills\/mixpanel\/query\.sh[\s$]/,
 	// Basic read-only utilities
 	/^\s*cat\s/,
 	/^\s*grep\s/,
@@ -67,8 +69,8 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*ls\s/,
 	/^\s*ls$/,
 	/^\s*find\s/,
-	/^\s*sort\s/,
-	/^\s*uniq\s/,
+	/^\s*sort(\s|$)/,
+	/^\s*uniq(\s|$)/,
 	/^\s*cut\s/,
 	/^\s*awk\s/,
 	/^\s*sed\s/,
@@ -80,6 +82,8 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*stat\s/,
 	/^\s*pwd$/,
 	/^\s*env$/,
+	// Python one-liners for data analysis (piped from other commands)
+	/^\s*python3\s+-c\s/,
 	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
 ];
 

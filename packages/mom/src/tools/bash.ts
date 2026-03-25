@@ -105,7 +105,7 @@ const READONLY_ALLOWED_COMMANDS = [
  * Checked against the ENTIRE raw command before allowlist evaluation.
  */
 const READONLY_BLOCKED_PATTERNS = [
-	/(?:^|[^\\])>/, // redirect stdout (>, >>), but not escaped \>
+	/(?:^|[^\\<>=])>(?!=)/, // redirect stdout (>, >>), but allow SQL comparisons (>=, <=, =>, <>)
 	/\btee\b/, // tee writes to files
 	/\bmkdir\b/, // create directories
 	/\btouch\b/, // create files

@@ -98,6 +98,8 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*xargs\b/,
 	/^\s*time\b/,
 	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
+	// bash with relative/absolute script path (e.g., after cd)
+	/^\s*bash\s+\S+\.sh\b/,
 ];
 
 /**
@@ -105,7 +107,7 @@ const READONLY_ALLOWED_COMMANDS = [
  * Checked against the ENTIRE raw command before allowlist evaluation.
  */
 const READONLY_BLOCKED_PATTERNS = [
-	/(?:^|[^\\<>=])>(?!=)/, // redirect stdout (>, >>), but allow SQL comparisons (>=, <=, =>, <>)
+	/(?:^|[^\\<>=0-9])>(?!=)/, // redirect stdout (>, >>), but allow SQL comparisons (>=, <=, =>, <>) and stderr redirects (2>/dev/null, 2>&1)
 	/\btee\b/, // tee writes to files
 	/\bmkdir\b/, // create directories
 	/\btouch\b/, // create files
@@ -126,14 +128,19 @@ const READONLY_BLOCKED_PATTERNS = [
  * Each segment must match the allowlist.
  */
 function isReadOnlyAllowed(command: string): boolean {
+	// Normalize: strip stderr redirects (2>/dev/null, 2>&1) — they are harmless
+	const normalized = command.replace(/\s+2>(?:\/dev\/null|&1)/g, "");
+
 	// Block any command that contains write operations
 	for (const pattern of READONLY_BLOCKED_PATTERNS) {
-		if (pattern.test(command)) return false;
+		if (pattern.test(normalized)) return false;
 	}
 
-	// Split by |, &&, ||, and ; — these are the common shell combinators.
-	// We split on them all so each sub-command is checked independently.
-	const segments = command.split(/\|{1,2}|&&|;/).map((s) => s.trim());
+	// Split by shell combinators (|, ||, &&, ;).
+	// Escaped pipes (\|) in grep patterns must be preserved, not treated as shell pipes.
+	const ESCAPED_PIPE_PLACEHOLDER = "\x00EP\x00";
+	const escaped = normalized.replace(/\\\|/g, ESCAPED_PIPE_PLACEHOLDER);
+	const segments = escaped.split(/\|{1,2}|&&|;/).map((s) => s.trim().replaceAll(ESCAPED_PIPE_PLACEHOLDER, "\\|"));
 	for (const segment of segments) {
 		if (!segment) continue;
 		const allowed = READONLY_ALLOWED_COMMANDS.some((pattern) => pattern.test(segment));

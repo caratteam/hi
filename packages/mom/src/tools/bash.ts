@@ -56,15 +56,12 @@ interface BashToolDetails {
  */
 const READONLY_TRUSTED_SCRIPTS = [
 	// DB query via skill script (with optional env vars and bash prefix)
+	// Safety: query.sh has internal keyword filter (blocks INSERT/UPDATE/DELETE/DROP) + dashboard read-only DB endpoint
 	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?\/workspace\/skills\/carat-db\/query\.sh\s/,
 	// Mixpanel event query via skill script
 	/^\s*(?:bash\s+)?\/workspace\/skills\/mixpanel\/query\.sh[\s]/,
-	// Direct psql with -c flag (read-only by DB user permissions)
-	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
-	// AWS CLI (read-only by IAM policy)
+	// AWS CLI (read-only by IAM ReadOnly policy)
 	/^\s*(?:aws\s)/,
-	// curl (read-only network requests — fetching data, APIs)
-	/^\s*curl\s/,
 ];
 
 /**
@@ -110,11 +107,10 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*which\b/,
 	/^\s*test\b/,
 	/^\s*\[\s/,
-	// Passthrough wrappers (xargs, time, etc.) — the inner command is also checked
-	/^\s*xargs\b/,
-	/^\s*time\b/,
-	// bash with relative/absolute script path (e.g., after cd)
-	/^\s*bash\s+\S+\.sh\b/,
+	// Note: xargs and time are intentionally excluded — they can execute arbitrary sub-commands
+	// (e.g., "xargs python3 -c", "time node -e") which bypasses the allowlist.
+	// curl for read-only HTTP requests (mutating flags are blocked by READONLY_BLOCKED_PATTERNS)
+	/^\s*curl\b/,
 ];
 
 /**
@@ -134,6 +130,25 @@ const READONLY_BLOCKED_PATTERNS = [
 	/\bln\b/, // create links
 	/\binstall\b/, // install command
 	/\bdd\b/, // disk dump
+	// sed in-place modification
+	/\bsed\b.*\s-i\b/, // sed -i
+	/\bsed\b.*--in-place\b/, // sed --in-place
+	// find destructive flags
+	/-delete\b/, // find -delete
+	/-exec\b/, // find -exec (can run arbitrary commands)
+	/-execdir\b/, // find -execdir
+	/-ok\b/, // find -ok
+	// sort output to file
+	/\bsort\b.*\s-o\b/, // sort -o writes to file
+	// curl mutating operations (curl itself is in allowlist for GET requests)
+	/\bcurl\b.*\s-X\s+(?:POST|PUT|DELETE|PATCH)\b/i, // explicit mutating methods
+	/\bcurl\b.*\s(?:-d|--data|--data-\w+)\b/, // POST data flags
+	/\bcurl\b.*\s(?:-F|--form)\b/, // form upload
+	/\bcurl\b.*\s(?:-T|--upload-file)\b/, // file upload
+	/\bcurl\b.*\s(?:-o|--output)\b/, // write response to file
+	/\bcurl\b.*\s-O\b/, // write response to file (remote name)
+	// Note: bash/sh/python/node are NOT in the allowlist, so they are automatically rejected.
+	// Only trusted scripts (query.sh etc.) bypass the allowlist check.
 ];
 
 /**

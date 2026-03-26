@@ -115,9 +115,6 @@ const READONLY_ALLOWED_COMMANDS = [
 	/^\s*time\b/,
 	// bash with relative/absolute script path (e.g., after cd)
 	/^\s*bash\s+\S+\.sh\b/,
-	// python/node for read-only scripting (e.g., data processing, API calls)
-	/^\s*(?:python3?|node)\s+-e\s/,
-	/^\s*(?:python3?|node)\s+\S+\.(py|js)\b/,
 ];
 
 /**

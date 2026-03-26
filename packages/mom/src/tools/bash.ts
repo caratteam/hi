@@ -49,14 +49,30 @@ interface BashToolDetails {
 }
 
 /**
- * Allowlist of commands for read-only mode.
- * Only these commands (and their common usage patterns) are permitted.
+ * Trusted read-only scripts. These are inherently safe (e.g., DB queries are read-only).
+ * Their arguments (SQL, API params, etc.) may contain >, <, etc. that would
+ * false-positive the blocked patterns, so they bypass the blocklist entirely.
+ * Matched against the full command string.
  */
-const READONLY_ALLOWED_COMMANDS = [
-	// DB query via skill script
+const READONLY_TRUSTED_SCRIPTS = [
+	// DB query via skill script (with optional env vars and bash prefix)
 	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?\/workspace\/skills\/carat-db\/query\.sh\s/,
 	// Mixpanel event query via skill script
-	/^\s*(?:bash\s+)?\/workspace\/skills\/mixpanel\/query\.sh[\s$]/,
+	/^\s*(?:bash\s+)?\/workspace\/skills\/mixpanel\/query\.sh[\s]/,
+	// Direct psql with -c flag (read-only by DB user permissions)
+	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
+	// AWS CLI (read-only by IAM policy)
+	/^\s*(?:aws\s)/,
+	// curl (read-only network requests — fetching data, APIs)
+	/^\s*curl\s/,
+];
+
+/**
+ * Allowlist of commands for read-only mode.
+ * Only these commands (and their common usage patterns) are permitted.
+ * Commands here are subject to the blocked patterns check.
+ */
+const READONLY_ALLOWED_COMMANDS = [
 	// Navigation & environment (no side effects)
 	/^\s*cd\b/,
 	/^\s*true$/,
@@ -97,14 +113,16 @@ const READONLY_ALLOWED_COMMANDS = [
 	// Passthrough wrappers (xargs, time, etc.) — the inner command is also checked
 	/^\s*xargs\b/,
 	/^\s*time\b/,
-	/^\s*PGPASSWORD=.*psql\s.*-c\s/,
 	// bash with relative/absolute script path (e.g., after cd)
 	/^\s*bash\s+\S+\.sh\b/,
+	// python/node for read-only scripting (e.g., data processing, API calls)
+	/^\s*(?:python3?|node)\s+-e\s/,
+	/^\s*(?:python3?|node)\s+\S+\.(py|js)\b/,
 ];
 
 /**
  * Patterns that indicate file-writing or destructive operations.
- * Checked against the ENTIRE raw command before allowlist evaluation.
+ * Only checked against non-trusted commands. Trusted scripts bypass this.
  */
 const READONLY_BLOCKED_PATTERNS = [
 	/(?:^|[^\\<>=0-9])>(?!=)/, // redirect stdout (>, >>), but allow SQL comparisons (>=, <=, =>, <>) and stderr redirects (2>/dev/null, 2>&1)
@@ -123,26 +141,39 @@ const READONLY_BLOCKED_PATTERNS = [
 
 /**
  * Check if a command is allowed in read-only mode.
- * 1. First rejects any command containing write operations (redirects, rm, cp, etc.)
- * 2. Then splits on |, &&, ;, and || so that "cd /dir && grep foo" is allowed.
- * Each segment must match the allowlist.
+ *
+ * Logic:
+ * 1. Normalize (strip harmless stderr redirects)
+ * 2. Split into shell segments (|, &&, ;, ||)
+ * 3. For each segment:
+ *    a. If it matches a trusted script → allow (skip blocked patterns, since arguments may contain >, < etc.)
+ *    b. If it matches the blocked patterns → reject
+ *    c. If it matches the general allowlist → allow
+ *    d. Otherwise → reject
  */
 function isReadOnlyAllowed(command: string): boolean {
 	// Normalize: strip stderr redirects (2>/dev/null, 2>&1) — they are harmless
 	const normalized = command.replace(/\s+2>(?:\/dev\/null|&1)/g, "");
-
-	// Block any command that contains write operations
-	for (const pattern of READONLY_BLOCKED_PATTERNS) {
-		if (pattern.test(normalized)) return false;
-	}
 
 	// Split by shell combinators (|, ||, &&, ;).
 	// Escaped pipes (\|) in grep patterns must be preserved, not treated as shell pipes.
 	const ESCAPED_PIPE_PLACEHOLDER = "\x00EP\x00";
 	const escaped = normalized.replace(/\\\|/g, ESCAPED_PIPE_PLACEHOLDER);
 	const segments = escaped.split(/\|{1,2}|&&|;/).map((s) => s.trim().replaceAll(ESCAPED_PIPE_PLACEHOLDER, "\\|"));
+
 	for (const segment of segments) {
 		if (!segment) continue;
+
+		// Trusted scripts bypass blocked patterns entirely
+		const isTrusted = READONLY_TRUSTED_SCRIPTS.some((pattern) => pattern.test(segment));
+		if (isTrusted) continue;
+
+		// Non-trusted commands must pass the blocked patterns check
+		for (const pattern of READONLY_BLOCKED_PATTERNS) {
+			if (pattern.test(segment)) return false;
+		}
+
+		// Non-trusted commands must also match the general allowlist
 		const allowed = READONLY_ALLOWED_COMMANDS.some((pattern) => pattern.test(segment));
 		if (!allowed) return false;
 	}

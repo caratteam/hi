@@ -317,7 +317,10 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 			case "custom":
 			case "custom_message":
 			case "label":
+			case "session_info":
+				break;
 		}
+
 		// branch_summary and custom_message are user-role messages, valid cut points
 		if (entry.type === "branch_summary" || entry.type === "custom_message") {
 			cutPoints.push(i);
@@ -522,6 +525,7 @@ export async function generateSummary(
 	model: Model<any>,
 	reserveTokens: number,
 	apiKey: string,
+	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	customInstructions?: string,
 	previousSummary?: string,
@@ -555,8 +559,8 @@ export async function generateSummary(
 	];
 
 	const completionOptions = model.reasoning
-		? { maxTokens, signal, apiKey, reasoning: "high" as const }
-		: { maxTokens, signal, apiKey };
+		? { maxTokens, signal, apiKey, headers, reasoning: "high" as const }
+		: { maxTokens, signal, apiKey, headers };
 
 	const response = await completeSimple(
 		model,
@@ -710,6 +714,7 @@ export async function compact(
 	preparation: CompactionPreparation,
 	model: Model<any>,
 	apiKey: string,
+	headers?: Record<string, string>,
 	customInstructions?: string,
 	signal?: AbortSignal,
 ): Promise<CompactionResult> {
@@ -736,12 +741,13 @@ export async function compact(
 						model,
 						settings.reserveTokens,
 						apiKey,
+						headers,
 						signal,
 						customInstructions,
 						previousSummary,
 					)
 				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal),
+			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, headers, signal),
 		]);
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -752,6 +758,7 @@ export async function compact(
 			model,
 			settings.reserveTokens,
 			apiKey,
+			headers,
 			signal,
 			customInstructions,
 			previousSummary,
@@ -782,6 +789,7 @@ async function generateTurnPrefixSummary(
 	model: Model<any>,
 	reserveTokens: number,
 	apiKey: string,
+	headers?: Record<string, string>,
 	signal?: AbortSignal,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
@@ -799,7 +807,7 @@ async function generateTurnPrefixSummary(
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ maxTokens, signal, apiKey },
+		{ maxTokens, signal, apiKey, headers },
 	);
 
 	if (response.stopReason === "error") {

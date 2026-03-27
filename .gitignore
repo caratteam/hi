@@ -7,6 +7,7 @@ dist/
 packages/*/dist/
 packages/*/dist-chrome/
 packages/*/dist-firefox/
+*.cpuprofile
 
 # Environment
 .env
@@ -36,3 +37,4 @@ todo.md
 
 .claude/
 .mom-temp/
+plans/

@@ -208,6 +208,14 @@ const RESERVE_TOKENS_RATIO = 0.3;
 /** Keep 15% of context window as recent tokens after compaction */
 const KEEP_RECENT_TOKENS_RATIO = 0.15;
 
+// Min/max caps: on 1M context models, ratio-based values become excessive.
+// A single prompt cache miss at 700K uncached tokens costs $10+ on Opus.
+// Cap ensures compaction triggers early enough to keep worst-case cost ~$3.
+const MIN_RESERVE_TOKENS = 16_384;
+const MIN_KEEP_RECENT_TOKENS = 8_192;
+const MAX_USABLE_CONTEXT = 200_000;
+const MAX_KEEP_RECENT_TOKENS = 40_000;
+
 const DEFAULT_RETRY: MomRetrySettings = {
 	enabled: true,
 	maxRetries: 3,
@@ -267,10 +275,21 @@ export class MomSettingsManager {
 		// If contextWindow is known, compute ratio-based defaults.
 		// Explicit values in settings.json always take precedence.
 		if (this.contextWindow > 0) {
+			// Ensure compaction triggers before MAX_USABLE_CONTEXT tokens.
+			// On 200K models: ratio-based 60K wins → triggers at 140K (unchanged).
+			// On 1M models: (1M - 200K) = 800K wins → triggers at 200K (capped).
+			const ratioBased = Math.round(this.contextWindow * RESERVE_TOKENS_RATIO);
+			const capBased = this.contextWindow - MAX_USABLE_CONTEXT;
+			const reserve = Math.max(MIN_RESERVE_TOKENS, ratioBased, capBased);
+			const usable = this.contextWindow - reserve;
+			const keep = Math.min(
+				MAX_KEEP_RECENT_TOKENS,
+				Math.max(MIN_KEEP_RECENT_TOKENS, Math.round(usable * KEEP_RECENT_TOKENS_RATIO)),
+			);
 			return {
 				enabled: explicit.enabled ?? DEFAULT_COMPACTION.enabled,
-				reserveTokens: explicit.reserveTokens ?? Math.round(this.contextWindow * RESERVE_TOKENS_RATIO),
-				keepRecentTokens: explicit.keepRecentTokens ?? Math.round(this.contextWindow * KEEP_RECENT_TOKENS_RATIO),
+				reserveTokens: explicit.reserveTokens ?? reserve,
+				keepRecentTokens: explicit.keepRecentTokens ?? keep,
 			};
 		}
 		return {

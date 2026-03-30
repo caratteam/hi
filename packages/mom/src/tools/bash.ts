@@ -57,9 +57,11 @@ interface BashToolDetails {
 const READONLY_TRUSTED_SCRIPTS = [
 	// DB query via skill script (with optional env vars and bash prefix)
 	// Safety: query.sh has internal keyword filter (blocks INSERT/UPDATE/DELETE/DROP) + dashboard read-only DB endpoint
-	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?\/workspace\/skills\/carat-db\/query\.sh\s/,
+	// Supports both absolute (/workspace/skills/carat-db/query.sh) and relative (query.sh) paths
+	/^\s*(?:QUERY_TIMEOUT_MS=\d+\s+)?(?:bash\s+)?(?:\/workspace\/skills\/carat-db\/)?query\.sh\s/,
 	// Mixpanel event query via skill script
-	/^\s*(?:bash\s+)?\/workspace\/skills\/mixpanel\/query\.sh[\s]/,
+	// Supports both absolute (/workspace/skills/mixpanel/query.sh) and relative (query.sh) paths
+	/^\s*(?:bash\s+)?(?:\/workspace\/skills\/mixpanel\/)?query\.sh[\s]/,
 	// AWS CLI (read-only by IAM ReadOnly policy)
 	/^\s*(?:aws\s)/,
 ];
@@ -142,7 +144,7 @@ const READONLY_BLOCKED_PATTERNS = [
 	/\bsort\b.*\s-o\b/, // sort -o writes to file
 	// curl mutating operations (curl itself is in allowlist for GET requests)
 	/\bcurl\b.*\s-X\s+(?:POST|PUT|DELETE|PATCH)\b/i, // explicit mutating methods
-	/\bcurl\b.*\s(?:-d|--data|--data-\w+)\b/, // POST data flags
+	/\bcurl\b.*\s(?:-d|--data|--data-\w+|--json)\b/, // POST data flags (--json implies POST + Content-Type)
 	/\bcurl\b.*\s(?:-F|--form)\b/, // form upload
 	/\bcurl\b.*\s(?:-T|--upload-file)\b/, // file upload
 	/\bcurl\b.*\s(?:-o|--output)\b/, // write response to file

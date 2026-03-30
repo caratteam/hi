@@ -169,6 +169,13 @@ function isReadOnlyAllowed(command: string): boolean {
 	// Normalize: strip stderr redirects (2>/dev/null, 2>&1) — they are harmless
 	const normalized = command.replace(/\s+2>(?:\/dev\/null|&1)/g, "");
 
+	// Check if the entire command is a trusted script call.
+	// Trusted scripts are safe end-to-end (e.g., query.sh has internal keyword filtering).
+	// Their arguments often contain shell metacharacters (;, >, <) that would cause
+	// false positives if we split the command by shell combinators first.
+	const isTrustedFull = READONLY_TRUSTED_SCRIPTS.some((pattern) => pattern.test(normalized.trim()));
+	if (isTrustedFull) return true;
+
 	// Split by shell combinators (|, ||, &&, ;).
 	// Escaped pipes (\|) in grep patterns must be preserved, not treated as shell pipes.
 	const ESCAPED_PIPE_PLACEHOLDER = "\x00EP\x00";

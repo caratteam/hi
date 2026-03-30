@@ -829,14 +829,23 @@ function createRunner(
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {
-			log.logInfo(`Auto-compaction started (reason: ${(event as any).reason})`);
+			const compSettings = settingsManager.getCompactionSettings();
+			log.logInfo(
+				`Auto-compaction started (reason: ${(event as any).reason}), settings: reserve=${compSettings.reserveTokens}, keepRecent=${compSettings.keepRecentTokens}, contextWindow=${(session as any).model?.contextWindow ?? "unknown"}`,
+			);
 			queue.enqueue(() => ctx.respond("_Compacting context..._", false), "compaction start");
 		} else if (event.type === "auto_compaction_end") {
 			const compEvent = event as any;
 			if (compEvent.result) {
-				log.logInfo(`Auto-compaction complete: ${compEvent.result.tokensBefore} tokens compacted`);
+				log.logInfo(
+					`Auto-compaction complete: ${compEvent.result.tokensBefore} tokens compacted, summary length: ${compEvent.result.summary?.length ?? 0} chars`,
+				);
 			} else if (compEvent.aborted) {
 				log.logInfo("Auto-compaction aborted");
+			} else if (compEvent.errorMessage) {
+				log.logWarning(`Auto-compaction failed: ${compEvent.errorMessage}`);
+			} else {
+				log.logWarning(`Auto-compaction ended with no result (no error, no abort, no result)`);
 			}
 		} else if (event.type === "auto_retry_start") {
 			const retryEvent = event as any;

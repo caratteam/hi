@@ -143,12 +143,6 @@ function loadMomSkills(channelDir: string, workspacePath: string): Skill[] {
 	return skills;
 }
 
-/** Build the system prompt and extract memory content for user-message injection.
- *  The memory body (everything except ## Rules) is returned separately as `memoryContent`
- *  so callers can inject it via <system-reminder> in the user message.
- *  This keeps the system prompt stable across turns, enabling prompt caching —
- *  any change in the system prompt prefix invalidates the cache for the entire
- *  conversation history that follows it. */
 function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
@@ -157,7 +151,7 @@ function buildSystemPrompt(
 	channels: ChannelInfo[],
 	users: UserInfo[],
 	skills: Skill[],
-): { prompt: string; memoryContent: string } {
+): string {
 	const isDocker = sandboxConfig.type === "docker";
 
 	// Format channel mappings
@@ -192,7 +186,7 @@ function buildSystemPrompt(
 			.trim();
 	}
 
-	const prompt = `You are mom, a Slack bot assistant. Be concise. No emojis.
+	return `You are mom, a Slack bot assistant. Be concise. No emojis.
 ${memoryRules ? `\n## Rules\n${memoryRules}\n` : ""}
 ## Context
 - For current date/time, use: date
@@ -325,7 +319,7 @@ Save information worth remembering across sessions. When you write memory, do it
 - \`${workspacePath}/MEMORY.md\` — auto-loaded every turn (below). Keep it small (<100 lines).
 
 ### Current Memory (${workspacePath}/MEMORY.md, auto-loaded)
-Memory content is injected as a <system-reminder> tag in each user message to preserve prompt caching.
+${memoryWithoutRules}
 
 ### IMPORTANT: Record Decisions Immediately
 When a new plan, decision, TODO, or phase emerges during conversation, do NOT just acknowledge it verbally. Immediately write it to the relevant file (skill-memory, SKILL.md, ARCHITECTURE.md) in that same turn.
@@ -360,8 +354,6 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 
 Each tool requires a "label" parameter (shown to user).
 `;
-
-	return { prompt, memoryContent: memoryWithoutRules };
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -650,7 +642,7 @@ function createRunner(
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
 	const memory = getMemory(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
-	const { prompt: systemPrompt } = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
 
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
@@ -924,12 +916,10 @@ function createRunner(
 				threadAgent.replaceMessages([]);
 			}
 
-			// Update system prompt with fresh memory, channel/user info, and skills.
-			// Memory body is extracted separately and injected as a <system-reminder>
-			// in the user message to preserve prompt caching (see buildSystemPrompt docs).
+			// Update system prompt with fresh memory, channel/user info, and skills
 			const memory = getMemory(channelDir);
 			const skills = loadMomSkills(channelDir, workspacePath);
-			const { prompt: systemPrompt, memoryContent } = buildSystemPrompt(
+			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
 				memory,
@@ -1039,9 +1029,7 @@ function createRunner(
 			};
 
 			// Log context info
-			log.logInfo(
-				`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars (injected via <system-reminder>)`,
-			);
+			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
 			log.logInfo(`Channels: ${ctx.channels.length}, Users: ${ctx.users.length}`);
 
 			// Build user message with timestamp and username prefix
@@ -1053,13 +1041,7 @@ function createRunner(
 			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
 			const offsetMins = pad(Math.abs(offset) % 60);
 			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
-			// Prepend memory as <system-reminder> to preserve prompt caching.
-			// Dynamic content in user messages keeps the system prompt prefix stable.
-			const memoryReminder =
-				memoryContent && memoryContent !== "(no working memory yet)"
-					? `<system-reminder>\n### Current Memory (/workspace/MEMORY.md, auto-loaded)\n${memoryContent}\n</system-reminder>\n\n`
-					: "";
-			let userMessage = `${memoryReminder}[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
+			let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
 			const imageAttachments: ImageContent[] = [];
 			const nonImagePaths: string[] = [];

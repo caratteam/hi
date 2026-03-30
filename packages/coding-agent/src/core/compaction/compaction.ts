@@ -530,7 +530,7 @@ export async function generateSummary(
 	customInstructions?: string,
 	previousSummary?: string,
 ): Promise<string> {
-	const maxTokens = Math.floor(0.8 * reserveTokens);
+	const maxTokens = Math.min(Math.floor(0.8 * reserveTokens), model.maxTokens);
 
 	// Use update prompt if we have a previous summary, otherwise initial prompt
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
@@ -792,7 +792,7 @@ async function generateTurnPrefixSummary(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
+	const maxTokens = Math.min(Math.floor(0.5 * reserveTokens), model.maxTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;

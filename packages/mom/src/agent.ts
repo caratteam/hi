@@ -639,7 +639,88 @@ function createRunner(
 	// Read-only tools for non-admin users (no Write, no Edit, restricted Bash)
 	const readOnlyTools = createReadOnlyMomTools(executor, uploadWrapper);
 
-	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
+	// System prompt rebuild control — preserves Anthropic's server-side prompt cache.
+	//
+	// Within a thread, memory/skills edits remain visible in conversation context,
+	// so we only rebuild the system prompt on:
+	//   1. First run (new thread or restart) — restore from cache file if unchanged
+	//   2. After compaction — must rebuild with latest memory/skills
+	//
+	// Key insight: on restart, even if memory changed since last session, the
+	// conversation context still has those changes in message history (pre-compaction).
+	// So we restore the cached prompt to preserve Anthropic's cache. Only compaction
+	// (which compresses message history) forces a true rebuild.
+	const promptCacheDir = join(channelDir, ".prompt-cache");
+	let needsInitialPrompt = true; // first run: restore from cache or initialize
+	let needsFreshRebuild = false; // after compaction: force rebuild with latest
+
+	/**
+	 * Apply system prompt. On first run, restores from cache file to preserve
+	 * Anthropic's prompt cache across restarts. After compaction, rebuilds fresh.
+	 */
+	function applySystemPrompt(agent: Agent, threadTs: string, ctx: SlackContext): void {
+		const cacheFile = join(promptCacheDir, `${threadTs}.txt`);
+
+		if (needsFreshRebuild) {
+			// Post-compaction: conversation context lost changes, must use latest
+			needsFreshRebuild = false;
+			const freshPrompt = buildFreshPrompt(ctx);
+			agent.setSystemPrompt(freshPrompt);
+			persistPromptCache(cacheFile, freshPrompt);
+			log.logInfo(`[${channelId}:${threadTs}] System prompt rebuilt after compaction`);
+			return;
+		}
+
+		if (needsInitialPrompt) {
+			// First run: try to restore cached prompt to preserve Anthropic cache
+			needsInitialPrompt = false;
+			let cached: string | null = null;
+			try {
+				if (existsSync(cacheFile)) cached = readFileSync(cacheFile, "utf-8");
+			} catch {
+				/* ignore */
+			}
+
+			if (cached !== null) {
+				// Restore previous prompt — changes since then are in conversation context
+				agent.setSystemPrompt(cached);
+				log.logInfo(`[${channelId}:${threadTs}] System prompt restored from cache`);
+			} else {
+				// No cache (new thread) — initialize with latest
+				const freshPrompt = buildFreshPrompt(ctx);
+				agent.setSystemPrompt(freshPrompt);
+				persistPromptCache(cacheFile, freshPrompt);
+				log.logInfo(`[${channelId}:${threadTs}] System prompt initialized`);
+			}
+			return;
+		}
+
+		// Subsequent runs in same session: no rebuild needed, prompt cache preserved
+	}
+
+	function buildFreshPrompt(ctx: SlackContext): string {
+		const freshMemory = getMemory(channelDir);
+		const freshSkills = loadMomSkills(channelDir, workspacePath);
+		return buildSystemPrompt(
+			workspacePath,
+			channelId,
+			freshMemory,
+			sandboxConfig,
+			ctx.channels,
+			ctx.users,
+			freshSkills,
+		);
+	}
+
+	function persistPromptCache(cacheFile: string, content: string): void {
+		mkdir(promptCacheDir, { recursive: true })
+			.then(() => writeFile(cacheFile, content, "utf-8"))
+			.catch(() => {
+				/* ignore */
+			});
+	}
+
+	// Initial system prompt for agent creation (channels/users not yet available)
 	const memory = getMemory(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
 	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
@@ -840,6 +921,10 @@ function createRunner(
 				log.logInfo(
 					`Auto-compaction complete: ${compEvent.result.tokensBefore} tokens compacted, summary length: ${compEvent.result.summary?.length ?? 0} chars`,
 				);
+				// Compaction compresses conversation context, potentially losing
+				// memory/skills changes that were only visible in message history.
+				// Force a fresh rebuild on next run.
+				needsFreshRebuild = true;
 			} else if (compEvent.aborted) {
 				log.logInfo("Auto-compaction aborted");
 			} else if (compEvent.errorMessage) {
@@ -925,25 +1010,15 @@ function createRunner(
 				threadAgent.replaceMessages([]);
 			}
 
-			// Update system prompt with fresh memory, channel/user info, and skills
-			const memory = getMemory(channelDir);
-			const skills = loadMomSkills(channelDir, workspacePath);
-			const systemPrompt = buildSystemPrompt(
-				workspacePath,
-				channelId,
-				memory,
-				sandboxConfig,
-				ctx.channels,
-				ctx.users,
-				skills,
-			);
-			threadAgent.setSystemPrompt(systemPrompt);
+			// Apply system prompt (from cache on restart, fresh after compaction, skip otherwise)
+			applySystemPrompt(threadAgent, threadTs, ctx);
 
 			// Swap tools based on read-only mode (non-admin users)
 			if (ctx.readOnly) {
 				threadAgent.setTools(readOnlyTools);
+				const basePrompt = threadAgent.state.systemPrompt;
 				threadAgent.setSystemPrompt(
-					systemPrompt +
+					basePrompt +
 						"\n\n## READ-ONLY MODE\n" +
 						"This request is from a non-admin user. You are in read-only mode:\n" +
 						"- You can ONLY use Read and Bash (restricted to DB queries and read-only utilities)\n" +

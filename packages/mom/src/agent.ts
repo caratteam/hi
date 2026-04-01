@@ -6,6 +6,7 @@ import {
 	AuthStorage,
 	convertToLlm,
 	createExtensionRuntime,
+	type Extension,
 	formatSkillsForPrompt,
 	loadSkillsFromDir,
 	ModelRegistry,
@@ -16,7 +17,7 @@ import {
 import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { basename, dirname, join } from "path";
 import { BASE64_STRIP_THRESHOLD, DEFAULT_CONTEXT_WINDOW, SLACK_MAX_TEXT } from "./constants.js";
 import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
@@ -238,7 +239,7 @@ Scripts are in: {baseDir}/
 \`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
 
 ### Skill Memory
-When you read a skill's SKILL.md, also read \`${workspacePath}/skill-memory/<skill-name>.md\` if it exists. This contains learned patterns, past decisions, and context specific to that skill.
+When you read a skill's SKILL.md, its corresponding \`${workspacePath}/skill-memory/<skill-name>.md\` is auto-appended to the read result. No need to read it separately.
 
 ### Skill Observations (Self-Evolution)
 After completing a task that used a skill, append a one-line observation to that skill's memory file (\`${workspacePath}/skill-memory/<skill-name>.md\`):
@@ -592,6 +593,91 @@ function getContextFilePath(channelDir: string, threadTs?: string): string {
 	return join(channelDir, "context-main.jsonl");
 }
 
+const SKILL_MEMORY_DIR = "skill-memory";
+const SKILL_FILENAME = "SKILL.md";
+const SKILL_MEMORY_MAX_LINES = 200;
+
+/**
+ * Create a skill-memory extension that auto-appends skill memory when SKILL.md is read.
+ * Mirrors carat-pi's extension pattern: intercepts tool_result for read tool,
+ * detects SKILL.md paths, and appends the corresponding skill-memory file content.
+ */
+function createSkillMemoryExtension(workspacePath: string): Extension {
+	const handler = async (event: unknown) => {
+		const e = event as {
+			type: string;
+			toolName: string;
+			toolCallId: string;
+			input: Record<string, unknown>;
+			content: Array<{ type: string; text?: string }>;
+			isError: boolean;
+		};
+		if (e.toolName !== "read" || e.isError) return;
+
+		const readPath = e.input.path as string | undefined;
+		if (!readPath) return;
+
+		// Extract skill name from SKILL.md path
+		if (basename(readPath) !== SKILL_FILENAME) return;
+		const dir = dirname(readPath);
+		const skillName = basename(dir);
+		if (!skillName || skillName === "." || skillName === "/") return;
+
+		// Read corresponding skill-memory file
+		const memoryPath = join(workspacePath, SKILL_MEMORY_DIR, `${skillName}.md`);
+		let memory: string;
+		try {
+			memory = readFileSync(memoryPath, "utf-8").trim();
+			if (!memory) return;
+		} catch {
+			return;
+		}
+
+		const lines = memory.split("\n");
+		let displayMemory: string;
+
+		if (lines.length > SKILL_MEMORY_MAX_LINES) {
+			displayMemory =
+				lines.slice(0, SKILL_MEMORY_MAX_LINES).join("\n") +
+				`\n\n[... truncated — only first ${SKILL_MEMORY_MAX_LINES} of ${lines.length} lines loaded]\n\n` +
+				`> ${SKILL_MEMORY_DIR}/${skillName}.md has ${lines.length} lines but only the first ${SKILL_MEMORY_MAX_LINES} are loaded. ` +
+				`Consolidate it now: merge related entries, remove outdated items, and keep only actionable observations.`;
+		} else {
+			displayMemory = memory;
+		}
+
+		log.logInfo(`[skill-memory] appending ${lines.length} lines for skill "${skillName}"`);
+
+		const memoryBlock = `\n\n---\n## Skill Memory (~/${SKILL_MEMORY_DIR}/${skillName}.md, auto-appended)\n\n${displayMemory}`;
+
+		const newContent = e.content.map((c) => {
+			if (c.type === "text" && c.text !== undefined) {
+				return { ...c, text: c.text + memoryBlock };
+			}
+			return c;
+		});
+
+		return { content: newContent };
+	};
+
+	return {
+		path: "<skill-memory>",
+		resolvedPath: "<skill-memory>",
+		sourceInfo: {
+			path: "<skill-memory>",
+			source: "built-in",
+			scope: "temporary" as const,
+			origin: "top-level" as const,
+		},
+		handlers: new Map([["tool_result", [handler]]]),
+		tools: new Map(),
+		messageRenderers: new Map(),
+		commands: new Map(),
+		flags: new Map(),
+		shortcuts: new Map(),
+	} as Extension;
+}
+
 function createRunner(
 	sandboxConfig: SandboxConfig,
 	channelId: string,
@@ -746,8 +832,14 @@ function createRunner(
 		});
 	}
 
+	// Extension handler runs on host, so use host path (channelDir/..) to read files.
+	// workspacePath is the container-internal path (/workspace) used in system prompt text only.
+	const hostWorkspacePath = join(channelDir, "..");
+	const skillMemoryExtension = createSkillMemoryExtension(hostWorkspacePath);
+	const extensionRuntime = createExtensionRuntime();
+
 	const resourceLoader: ResourceLoader = {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+		getExtensions: () => ({ extensions: [skillMemoryExtension], errors: [], runtime: extensionRuntime }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),

@@ -72,6 +72,11 @@ const READONLY_TRUSTED_SCRIPTS = [
 	// Safety: search.py queries DuckDuckGo HTML, content.py fetches page text — both read-only
 	// Uses python3 (not in allowlist) but scripts are inherently safe (no file writes)
 	/^\s*(?:python3?\s+)(?:\/workspace\/skills\/web-search\/scripts\/)?(?:search|content)\.py[\s]/,
+	// Scout — spawns a sub-agent for context gathering (read-only mode only)
+	// Safety: The regex REQUIRES --read-only flag, which makes scout run with
+	// --tools read,bash (no Write/Edit) and append READ-ONLY MODE system prompt.
+	// Without --read-only, the command is rejected (not in allowlist).
+	/^\s*(?:node\s+)(?:\/workspace\/skills\/scout\/)?scout\.mjs\s(?=.*--read-only)/,
 ];
 
 /**

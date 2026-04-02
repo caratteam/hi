@@ -1140,16 +1140,6 @@ function createRunner(
 			// Swap tools based on read-only mode (non-admin users)
 			if (ctx.readOnly) {
 				threadAgent.setTools(readOnlyTools);
-				const basePrompt = threadAgent.state.systemPrompt;
-				threadAgent.setSystemPrompt(
-					basePrompt +
-						"\n\n## READ-ONLY MODE\n" +
-						"This request is from a non-admin user. You are in read-only mode:\n" +
-						"- You can ONLY use Read and Bash (restricted to DB queries and read-only utilities)\n" +
-						"- You CANNOT create/modify files, skills, events, or memory\n" +
-						"- Answer the user's question using existing knowledge and DB queries\n" +
-						"- Be helpful and concise\n",
-				);
 				log.logInfo(`[${channelId}:${threadTs}] Read-only mode: restricted tools`);
 			} else {
 				threadAgent.setTools(tools);

@@ -64,6 +64,14 @@ const READONLY_TRUSTED_SCRIPTS = [
 	/^\s*(?:bash\s+)?(?:\/workspace\/skills\/mixpanel\/)?query\.sh[\s]/,
 	// AWS CLI (read-only by IAM ReadOnly policy)
 	/^\s*(?:aws\s)/,
+	// Vision image analysis via skill script
+	// Safety: analyze.sh only calls Gemini API and returns text — no file mutations
+	// Uses curl -d (POST), mktemp, rm, base64 internally which would false-positive the blocklist
+	/^\s*(?:bash\s+)?(?:\/workspace\/skills\/vision\/)?analyze\.sh\s/,
+	// Web search and content extraction via skill scripts
+	// Safety: search.py queries DuckDuckGo HTML, content.py fetches page text — both read-only
+	// Uses python3 (not in allowlist) but scripts are inherently safe (no file writes)
+	/^\s*(?:python3?\s+)(?:\/workspace\/skills\/web-search\/scripts\/)?(?:search|content)\.py[\s]/,
 ];
 
 /**

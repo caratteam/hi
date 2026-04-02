@@ -126,54 +126,69 @@ const READONLY_ALLOWED_COMMANDS = [
 /**
  * Patterns that indicate file-writing or destructive operations.
  * Only checked against non-trusted commands. Trusted scripts bypass this.
+ * Each entry has a reason string for detailed error messages.
  */
-const READONLY_BLOCKED_PATTERNS = [
-	/(?:^|[^\\<>=0-9])>(?!=)/, // redirect stdout (>, >>), but allow SQL comparisons (>=, <=, =>, <>) and stderr redirects (2>/dev/null, 2>&1)
-	/\btee\b/, // tee writes to files
-	/\bmkdir\b/, // create directories
-	/\btouch\b/, // create files
-	/\brm\b/, // remove files
-	/\bmv\b/, // move/rename files
-	/\bcp\b/, // copy files
-	/\bchmod\b/, // change permissions
-	/\bchown\b/, // change ownership
-	/\bln\b/, // create links
-	/\binstall\b/, // install command
-	/\bdd\b/, // disk dump
+const READONLY_BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+	{ pattern: /(?:^|[^\\<>=0-9])>(?!=)/, reason: "stdout redirect (>) writes to file" },
+	{ pattern: /\btee\b/, reason: "'tee' writes to files" },
+	{ pattern: /\bmkdir\b/, reason: "'mkdir' creates directories" },
+	{ pattern: /\btouch\b/, reason: "'touch' creates files" },
+	{ pattern: /\brm\b/, reason: "'rm' removes files" },
+	{ pattern: /\bmv\b/, reason: "'mv' moves/renames files" },
+	{ pattern: /\bcp\b/, reason: "'cp' copies files" },
+	{ pattern: /\bchmod\b/, reason: "'chmod' changes permissions" },
+	{ pattern: /\bchown\b/, reason: "'chown' changes ownership" },
+	{ pattern: /\bln\b/, reason: "'ln' creates links" },
+	{ pattern: /\binstall\b/, reason: "'install' modifies filesystem" },
+	{ pattern: /\bdd\b/, reason: "'dd' writes to disk" },
 	// sed in-place modification
-	/\bsed\b.*\s-i\b/, // sed -i
-	/\bsed\b.*--in-place\b/, // sed --in-place
+	{ pattern: /\bsed\b.*\s-i\b/, reason: "'sed -i' modifies files in-place" },
+	{ pattern: /\bsed\b.*--in-place\b/, reason: "'sed --in-place' modifies files in-place" },
 	// find destructive flags
-	/-delete\b/, // find -delete
-	/-exec\b/, // find -exec (can run arbitrary commands)
-	/-execdir\b/, // find -execdir
-	/-ok\b/, // find -ok
+	{ pattern: /-delete\b/, reason: "'find -delete' removes files" },
+	{ pattern: /-exec\b/, reason: "'find -exec' can run arbitrary commands" },
+	{ pattern: /-execdir\b/, reason: "'find -execdir' can run arbitrary commands" },
+	{ pattern: /-ok\b/, reason: "'find -ok' can run arbitrary commands" },
 	// sort output to file
-	/\bsort\b.*\s-o\b/, // sort -o writes to file
+	{ pattern: /\bsort\b.*\s-o\b/, reason: "'sort -o' writes output to file" },
 	// curl mutating operations (curl itself is in allowlist for GET requests)
-	/\bcurl\b.*\s-X\s+(?:POST|PUT|DELETE|PATCH)\b/i, // explicit mutating methods
-	/\bcurl\b.*\s(?:-d|--data|--data-\w+|--json)\b/, // POST data flags (--json implies POST + Content-Type)
-	/\bcurl\b.*\s(?:-F|--form)\b/, // form upload
-	/\bcurl\b.*\s(?:-T|--upload-file)\b/, // file upload
-	/\bcurl\b.*\s(?:-o|--output)\b/, // write response to file
-	/\bcurl\b.*\s-O\b/, // write response to file (remote name)
+	{
+		pattern: /\bcurl\b.*\s-X\s+(?:POST|PUT|DELETE|PATCH)\b/i,
+		reason: "curl with mutating HTTP method (POST/PUT/DELETE/PATCH)",
+	},
+	{ pattern: /\bcurl\b.*\s(?:-d|--data|--data-\w+|--json)\b/, reason: "curl with POST data flags (-d/--data/--json)" },
+	{ pattern: /\bcurl\b.*\s(?:-F|--form)\b/, reason: "curl with form upload (-F/--form)" },
+	{ pattern: /\bcurl\b.*\s(?:-T|--upload-file)\b/, reason: "curl with file upload (-T/--upload-file)" },
+	{ pattern: /\bcurl\b.*\s(?:-o|--output)\b/, reason: "curl writing response to file (-o/--output)" },
+	{ pattern: /\bcurl\b.*\s-O\b/, reason: "curl writing response to file (-O)" },
 	// Note: bash/sh/python/node are NOT in the allowlist, so they are automatically rejected.
 	// Only trusted scripts (query.sh etc.) bypass the allowlist check.
 ];
 
 /**
+ * Result of read-only command check.
+ * If allowed, reason is undefined.
+ * If blocked, reason explains why (which segment, what rule).
+ */
+interface ReadOnlyCheckResult {
+	allowed: boolean;
+	reason?: string;
+}
+
+/**
  * Check if a command is allowed in read-only mode.
+ * Returns { allowed: true } or { allowed: false, reason: "..." } with a detailed explanation.
  *
  * Logic:
  * 1. Normalize (strip harmless stderr redirects)
  * 2. Split into shell segments (|, &&, ;, ||)
  * 3. For each segment:
  *    a. If it matches a trusted script → allow (skip blocked patterns, since arguments may contain >, < etc.)
- *    b. If it matches the blocked patterns → reject
+ *    b. If it matches the blocked patterns → reject with specific reason
  *    c. If it matches the general allowlist → allow
- *    d. Otherwise → reject
+ *    d. Otherwise → reject (command not in allowlist)
  */
-function isReadOnlyAllowed(command: string): boolean {
+function checkReadOnlyCommand(command: string): ReadOnlyCheckResult {
 	// Normalize: strip stderr redirects (2>/dev/null, 2>&1) — they are harmless
 	const normalized = command.replace(/\s+2>(?:\/dev\/null|&1)/g, "");
 
@@ -182,7 +197,7 @@ function isReadOnlyAllowed(command: string): boolean {
 	// Their arguments often contain shell metacharacters (;, >, <) that would cause
 	// false positives if we split the command by shell combinators first.
 	const isTrustedFull = READONLY_TRUSTED_SCRIPTS.some((pattern) => pattern.test(normalized.trim()));
-	if (isTrustedFull) return true;
+	if (isTrustedFull) return { allowed: true };
 
 	// Split by shell combinators (|, ||, &&, ;).
 	// Escaped pipes (\|) in grep patterns must be preserved, not treated as shell pipes.
@@ -198,15 +213,27 @@ function isReadOnlyAllowed(command: string): boolean {
 		if (isTrusted) continue;
 
 		// Non-trusted commands must pass the blocked patterns check
-		for (const pattern of READONLY_BLOCKED_PATTERNS) {
-			if (pattern.test(segment)) return false;
+		for (const { pattern, reason } of READONLY_BLOCKED_PATTERNS) {
+			if (pattern.test(segment)) {
+				return {
+					allowed: false,
+					reason: `Blocked: ${reason}. Segment: \`${segment.length > 80 ? segment.slice(0, 80) + "..." : segment}\``,
+				};
+			}
 		}
 
 		// Non-trusted commands must also match the general allowlist
 		const allowed = READONLY_ALLOWED_COMMANDS.some((pattern) => pattern.test(segment));
-		if (!allowed) return false;
+		if (!allowed) {
+			// Extract the first word to identify the command
+			const firstWord = segment.match(/^\s*(\S+)/)?.[1] || segment;
+			return {
+				allowed: false,
+				reason: `Command '${firstWord}' is not in the read-only allowlist. Allowed: cat, grep, head, tail, wc, jq, date, echo, printf, ls, find, sort, uniq, cut, awk, sed, diff, du, df, file, stat, tree, curl (GET only), and DB/Mixpanel query scripts.`,
+			};
+		}
 	}
-	return true;
+	return { allowed: true };
 }
 
 /**
@@ -224,10 +251,9 @@ export function createReadOnlyBashTool(executor: Executor): AgentTool<typeof bas
 			{ command, timeout }: { label: string; command: string; timeout?: number },
 			signal?: AbortSignal,
 		) => {
-			if (!isReadOnlyAllowed(command)) {
-				throw new Error(
-					`Command not allowed in read-only mode. Only DB queries and read-only utilities (cat, grep, head, tail, jq, date, etc.) are permitted.`,
-				);
+			const check = checkReadOnlyCommand(command);
+			if (!check.allowed) {
+				throw new Error(`Command not allowed in read-only mode. ${check.reason}`);
 			}
 
 			const result = await executor.exec(command, { timeout, signal });

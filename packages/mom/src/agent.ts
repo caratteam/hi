@@ -14,7 +14,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
@@ -585,8 +585,38 @@ const SKILL_MEMORY_DIR = "skill-memory";
 const SKILL_FILENAME = "SKILL.md";
 const SKILL_MEMORY_MAX_LINES = 200;
 
+const SKILL_FILE_MAX_LINES = 200;
+
+/**
+ * Find .md files in a skill directory that exceed the line threshold.
+ * Checks every .md file individually — any single file being too large is the problem,
+ * regardless of how many other files exist.
+ */
+function findOversizedSkillFiles(skillDir: string): Array<{ name: string; lines: number }> {
+	const oversized: Array<{ name: string; lines: number }> = [];
+	try {
+		const entries = readdirSync(skillDir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+			try {
+				const content = readFileSync(join(skillDir, entry.name), "utf-8");
+				const lineCount = content.split("\n").length;
+				if (lineCount > SKILL_FILE_MAX_LINES) {
+					oversized.push({ name: entry.name, lines: lineCount });
+				}
+			} catch {
+				// skip unreadable files
+			}
+		}
+	} catch {
+		// skill dir not readable
+	}
+	return oversized;
+}
+
 /**
  * Create a skill-memory extension that auto-appends skill memory when SKILL.md is read.
+ * Also checks for oversized files and suggests progressive disclosure when appropriate.
  * Mirrors carat-pi's extension pattern: intercepts tool_result for read tool,
  * detects SKILL.md paths, and appends the corresponding skill-memory file content.
  */
@@ -636,11 +666,25 @@ function createSkillMemoryExtension(workspacePath: string): Extension {
 
 		log.logInfo(`[skill-memory] appending ${lines.length} lines for skill "${skillName}"`);
 
-		const memoryBlock = `\n\n---\n## Skill Memory (~/${SKILL_MEMORY_DIR}/${skillName}.md, auto-appended)\n\n${displayMemory}`;
+		let appendBlock = `\n\n---\n## Skill Memory (~/${SKILL_MEMORY_DIR}/${skillName}.md, auto-appended)\n\n${displayMemory}`;
+
+		// Check for oversized files in the skill directory.
+		// Any single .md file exceeding the threshold is flagged with concrete actions.
+		const oversized = findOversizedSkillFiles(dir);
+		if (oversized.length > 0) {
+			const fileList = oversized.map((f) => `${f.name} (${f.lines} lines)`).join(", ");
+			appendBlock +=
+				`\n\n---\n> **Skill structure note:** ${fileList} exceeded ${SKILL_FILE_MAX_LINES} lines. ` +
+				`After completing the current task, consolidate this skill AND its skill-memory file (${SKILL_MEMORY_DIR}/${skillName}.md): ` +
+				`(1) deduplicate — merge overlapping entries and generalize specific examples into reusable principles, ` +
+				`(2) remove outdated information that no longer applies, ` +
+				`(3) classify the remaining content by task type and split into focused reference files, ` +
+				`(4) add a loading guide to SKILL.md so only task-relevant files are loaded each time.`;
+		}
 
 		const newContent = e.content.map((c) => {
 			if (c.type === "text" && c.text !== undefined) {
-				return { ...c, text: c.text + memoryBlock };
+				return { ...c, text: c.text + appendBlock };
 			}
 			return c;
 		});

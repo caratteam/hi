@@ -241,18 +241,6 @@ Scripts are in: {baseDir}/
 ### Skill Memory
 When you read a skill's SKILL.md, its corresponding \`${workspacePath}/skill-memory/<skill-name>.md\` is auto-appended to the read result. No need to read it separately.
 
-### Skill Observations (Self-Evolution)
-After completing a task that used a skill, append a one-line observation to that skill's memory file (\`${workspacePath}/skill-memory/<skill-name>.md\`):
-
-\`\`\`
-## Observations
-- [YYYY-MM-DD] outcome:success|partial|fail | <what happened, what was missing, what workaround was needed>
-\`\`\`
-
-Record when: the skill's instructions were incomplete, a script failed and you found a workaround, you used knowledge that the skill should have documented, or the skill worked perfectly on a new use case.
-Skip if: the task was trivial and the skill worked exactly as documented with nothing new learned.
-These observations fuel periodic skill health checks that auto-improve SKILL.md files over time.
-
 ### Available Skills
 ${skills.length > 0 ? formatSkillsForPrompt(skills) : "(no skills installed yet)"}
 

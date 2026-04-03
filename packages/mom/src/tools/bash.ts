@@ -40,7 +40,12 @@ function findBlockedCommand(command: string): string | null {
 const bashSchema = Type.Object({
 	label: Type.String({ description: "Brief description of what this command does (shown to user)" }),
 	command: Type.String({ description: "Bash command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	run_in_background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Run the command in background immediately. Returns PID and output file path instead of waiting for completion. Use for commands you know will take a long time.",
+		}),
+	),
 });
 
 interface BashToolDetails {
@@ -222,7 +227,7 @@ function checkReadOnlyCommand(command: string): ReadOnlyCheckResult {
 			if (pattern.test(segment)) {
 				return {
 					allowed: false,
-					reason: `Blocked: ${reason}. Segment: \`${segment.length > 80 ? segment.slice(0, 80) + "..." : segment}\``,
+					reason: `Blocked: ${reason}. Segment: \`${segment.length > 80 ? `${segment.slice(0, 80)}...` : segment}\``,
 				};
 			}
 		}
@@ -251,17 +256,13 @@ export function createReadOnlyBashTool(executor: Executor): AgentTool<typeof bas
 		label: "bash",
 		description: `Execute a read-only bash command. Only allows: DB queries via /workspace/skills/carat-db/query.sh, and basic read utilities (cat, grep, head, tail, jq, date, etc.). File writes, package installs, and other modifications are blocked.`,
 		parameters: bashSchema,
-		execute: async (
-			_toolCallId: string,
-			{ command, timeout }: { label: string; command: string; timeout?: number },
-			signal?: AbortSignal,
-		) => {
+		execute: async (_toolCallId: string, { command }: { label: string; command: string }, signal?: AbortSignal) => {
 			const check = checkReadOnlyCommand(command);
 			if (!check.allowed) {
 				throw new Error(`Command not allowed in read-only mode. ${check.reason}`);
 			}
 
-			const result = await executor.exec(command, { timeout, signal });
+			const result = await executor.exec(command, { signal });
 			let output = "";
 			if (result.stdout) output += result.stdout;
 			if (result.stderr) {
@@ -285,11 +286,11 @@ export function createBashTool(executor: Executor, getUserId: () => string | und
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Long-running commands (>60s) are automatically backgrounded. Use run_in_background for commands you know will take a long time.`,
 		parameters: bashSchema,
 		execute: async (
 			_toolCallId: string,
-			{ command, timeout }: { label: string; command: string; timeout?: number },
+			{ command, run_in_background }: { label: string; command: string; run_in_background?: boolean },
 			signal?: AbortSignal,
 		) => {
 			// Check for blocked commands (server protection)
@@ -305,11 +306,33 @@ export function createBashTool(executor: Executor, getUserId: () => string | und
 			if (userId) {
 				checkAccess({ userId, command }, "execute");
 			}
-			// Track output for potential temp file writing
-			let tempFilePath: string | undefined;
-			let tempFileStream: ReturnType<typeof createWriteStream> | undefined;
 
-			const result = await executor.exec(command, { timeout, signal });
+			const result = await executor.exec(command, {
+				signal,
+				runInBackground: run_in_background,
+			});
+
+			// Background mode: command exceeded threshold or was explicitly backgrounded
+			if (result.backgrounded) {
+				const lines = [
+					"Command is running in background.",
+					`PID: ${result.pid}`,
+					`Output file: ${result.outputFile}`,
+				];
+				if (result.partialOutput) {
+					lines.push("", "Partial output so far:", result.partialOutput);
+				}
+				lines.push(
+					"",
+					`Check output: cat ${result.outputFile}`,
+					`Check if running: kill -0 ${result.pid} 2>/dev/null && echo "running" || echo "done"`,
+					`Last 20 lines: tail -20 ${result.outputFile}`,
+					`Check if finished: grep -c "EXIT CODE" ${result.outputFile}`,
+				);
+				return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
+			}
+
+			// Normal mode: process completed within threshold
 			let output = "";
 			if (result.stdout) output += result.stdout;
 			if (result.stderr) {
@@ -320,9 +343,10 @@ export function createBashTool(executor: Executor, getUserId: () => string | und
 			const totalBytes = Buffer.byteLength(output, "utf-8");
 
 			// Write to temp file if output exceeds limit
+			let tempFilePath: string | undefined;
 			if (totalBytes > DEFAULT_MAX_BYTES) {
 				tempFilePath = getTempFilePath();
-				tempFileStream = createWriteStream(tempFilePath);
+				const tempFileStream = createWriteStream(tempFilePath);
 				tempFileStream.write(output);
 				tempFileStream.end();
 			}

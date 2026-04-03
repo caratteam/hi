@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import { PROCESS_BUFFER_MAX } from "./constants.js";
 
 // Background mode constants
@@ -80,15 +80,11 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
 /**
  * Create an executor that runs commands either on host or in Docker container
  */
-export function createExecutor(
-	config: SandboxConfig,
-	envVars?: Record<string, string>,
-	hostWorkspaceDir?: string,
-): Executor {
+export function createExecutor(config: SandboxConfig, envVars?: Record<string, string>): Executor {
 	if (config.type === "host") {
 		return new HostExecutor();
 	}
-	return new DockerExecutor(config.container, envVars, hostWorkspaceDir);
+	return new DockerExecutor(config.container, envVars);
 }
 
 export interface Executor {
@@ -206,26 +202,55 @@ const BG_DIR_CONTAINER = "/workspace/.bg";
 
 class DockerExecutor implements Executor {
 	private envVars: Record<string, string>;
-	/** Host-side path that maps to /workspace inside the container */
-	private hostWorkspaceDir: string;
+	/** Host-side path that maps to /workspace inside the container (resolved lazily via docker inspect) */
+	private hostWorkspacePath: string | null = null;
 
 	constructor(
 		private container: string,
 		envVars?: Record<string, string>,
-		hostWorkspaceDir?: string,
 	) {
 		this.envVars = envVars || {};
-		this.hostWorkspaceDir = hostWorkspaceDir || "/workspace";
+	}
+
+	/**
+	 * Get the host-side path for /workspace (resolved once via `docker inspect`).
+	 * Falls back to /workspace if resolution fails.
+	 */
+	private getHostWorkspacePath(): string {
+		if (this.hostWorkspacePath !== null) return this.hostWorkspacePath;
+
+		try {
+			const output = execFileSync(
+				"docker",
+				[
+					"inspect",
+					"-f",
+					'{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}',
+					this.container,
+				],
+				{ encoding: "utf-8" },
+			).trim();
+
+			if (output) {
+				this.hostWorkspacePath = output;
+			} else {
+				this.hostWorkspacePath = "/workspace";
+			}
+		} catch {
+			this.hostWorkspacePath = "/workspace";
+		}
+		return this.hostWorkspacePath;
 	}
 
 	/**
 	 * Convert a container path (e.g., /workspace/.bg/xxx.out) to the host-side path.
 	 */
 	private containerPathToHost(containerPath: string): string {
+		const hostWs = this.getHostWorkspacePath();
 		if (containerPath.startsWith("/workspace/")) {
-			return join(this.hostWorkspaceDir, containerPath.slice("/workspace/".length));
+			return join(hostWs, containerPath.slice("/workspace/".length));
 		}
-		if (containerPath === "/workspace") return this.hostWorkspaceDir;
+		if (containerPath === "/workspace") return hostWs;
 		return containerPath;
 	}
 

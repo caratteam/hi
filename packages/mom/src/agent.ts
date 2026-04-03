@@ -711,9 +711,8 @@ function createRunner(
 		}
 	}
 
-	const hostWorkspaceDir = channelDir.replace(`/${channelId}`, "");
-	const executor = createExecutor(sandboxConfig, sandboxEnv, hostWorkspaceDir);
-	const workspacePath = executor.getWorkspacePath(hostWorkspaceDir);
+	const executor = createExecutor(sandboxConfig, sandboxEnv);
+	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 
 	// User ID will be set during run()
 	let currentUserId: string | undefined;

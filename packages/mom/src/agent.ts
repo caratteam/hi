@@ -22,7 +22,7 @@ import { BASE64_STRIP_THRESHOLD, DEFAULT_CONTEXT_WINDOW, SLACK_MAX_TEXT } from "
 import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
-import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
+import type { SlackContext } from "./slack.js";
 import type { ChannelStore } from "./store.js";
 import { createMomTools, createReadOnlyMomTools } from "./tools/index.js";
 
@@ -149,19 +149,9 @@ function buildSystemPrompt(
 	channelId: string,
 	memory: string,
 	sandboxConfig: SandboxConfig,
-	channels: ChannelInfo[],
-	users: UserInfo[],
 	skills: Skill[],
 ): string {
 	const isDocker = sandboxConfig.type === "docker";
-
-	// Format channel mappings
-	const channelMappings =
-		channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
-
-	// Format user mappings
-	const userMappings =
-		users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
 
 	const envDescription = isDocker
 		? `You are running inside a Docker container (Debian Linux).
@@ -172,23 +162,8 @@ function buildSystemPrompt(
 - Bash working directory: ${process.cwd()}
 - Be careful with system modifications`;
 
-	// Extract ## Rules section from memory and place it prominently in the prompt.
-	// This ensures behavioral rules get high attention instead of being buried
-	// deep inside the memory content where they lose effectiveness.
-	let memoryRules = "";
-	let memoryWithoutRules = memory;
-	const memorySections = memory.split(/^(?=## )/m);
-	const rulesSection = memorySections.find((s) => s.startsWith("## Rules"));
-	if (rulesSection) {
-		memoryRules = rulesSection.replace(/^## Rules\n/, "").trim();
-		memoryWithoutRules = memorySections
-			.filter((s) => !s.startsWith("## Rules"))
-			.join("")
-			.trim();
-	}
-
 	return `You are mom, a Slack bot assistant. Be concise. No emojis.
-${memoryRules ? `\n## Rules\n${memoryRules}\n` : ""}
+
 ## Context
 - For current date/time, use: date
 - You have access to previous conversation context including tool results from prior turns.
@@ -197,13 +172,6 @@ ${memoryRules ? `\n## Rules\n${memoryRules}\n` : ""}
 ## Slack Formatting (mrkdwn, NOT Markdown)
 Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
 Do NOT use **double asterisks** or [markdown](links).
-
-## Slack IDs
-Channels: ${channelMappings}
-
-Users: ${userMappings}
-
-When mentioning users, use <@username> format (e.g., <@mario>).
 
 ## Environment
 ${envDescription}
@@ -308,7 +276,7 @@ Save information worth remembering across sessions. When you write memory, do it
 - \`${workspacePath}/MEMORY.md\` — auto-loaded every turn (below). Keep it small (<100 lines).
 
 ### Current Memory (${workspacePath}/MEMORY.md, auto-loaded)
-${memoryWithoutRules}
+${memory}
 
 ### IMPORTANT: Record Decisions Immediately
 When a new plan, decision, TODO, or phase emerges during conversation, do NOT just acknowledge it verbally. Immediately write it to the relevant file (skill-memory, SKILL.md, ARCHITECTURE.md) in that same turn.
@@ -780,13 +748,13 @@ function createRunner(
 	 * Apply system prompt. On first run, restores from cache file to preserve
 	 * Anthropic's prompt cache across restarts. After compaction, rebuilds fresh.
 	 */
-	function applySystemPrompt(agent: Agent, threadTs: string, ctx: SlackContext): void {
+	function applySystemPrompt(agent: Agent, threadTs: string): void {
 		const cacheFile = join(promptCacheDir, `${threadTs}.txt`);
 
 		if (needsFreshRebuild) {
 			// Post-compaction: conversation context lost changes, must use latest
 			needsFreshRebuild = false;
-			const freshPrompt = buildFreshPrompt(ctx);
+			const freshPrompt = buildFreshPrompt();
 			agent.setSystemPrompt(freshPrompt);
 			persistPromptCache(cacheFile, freshPrompt);
 			log.logInfo(`[${channelId}:${threadTs}] System prompt rebuilt after compaction`);
@@ -809,7 +777,7 @@ function createRunner(
 				log.logInfo(`[${channelId}:${threadTs}] System prompt restored from cache`);
 			} else {
 				// No cache (new thread) — initialize with latest
-				const freshPrompt = buildFreshPrompt(ctx);
+				const freshPrompt = buildFreshPrompt();
 				agent.setSystemPrompt(freshPrompt);
 				persistPromptCache(cacheFile, freshPrompt);
 				log.logInfo(`[${channelId}:${threadTs}] System prompt initialized`);
@@ -820,18 +788,10 @@ function createRunner(
 		// Subsequent runs in same session: no rebuild needed, prompt cache preserved
 	}
 
-	function buildFreshPrompt(ctx: SlackContext): string {
+	function buildFreshPrompt(): string {
 		const freshMemory = getMemory(channelDir);
 		const freshSkills = loadMomSkills(channelDir, workspacePath);
-		return buildSystemPrompt(
-			workspacePath,
-			channelId,
-			freshMemory,
-			sandboxConfig,
-			ctx.channels,
-			ctx.users,
-			freshSkills,
-		);
+		return buildSystemPrompt(workspacePath, channelId, freshMemory, sandboxConfig, freshSkills);
 	}
 
 	function persistPromptCache(cacheFile: string, content: string): void {
@@ -845,7 +805,7 @@ function createRunner(
 	// Initial system prompt for agent creation (channels/users not yet available)
 	const memory = getMemory(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, skills);
 
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
@@ -1139,7 +1099,7 @@ function createRunner(
 			}
 
 			// Apply system prompt (from cache on restart, fresh after compaction, skip otherwise)
-			applySystemPrompt(threadAgent, threadTs, ctx);
+			applySystemPrompt(threadAgent, threadTs);
 
 			// Swap tools based on read-only mode (non-admin users)
 			if (ctx.readOnly) {

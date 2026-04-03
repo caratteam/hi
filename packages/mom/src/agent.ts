@@ -669,17 +669,21 @@ function createSkillMemoryExtension(workspacePath: string): Extension {
 		let appendBlock = `\n\n---\n## Skill Memory (~/${SKILL_MEMORY_DIR}/${skillName}.md, auto-appended)\n\n${displayMemory}`;
 
 		// Check for oversized files in the skill directory.
-		// Any single .md file exceeding the threshold is flagged with concrete actions.
+		// Any single .md file exceeding the threshold is flagged with progressive disclosure guidance.
 		const oversized = findOversizedSkillFiles(dir);
 		if (oversized.length > 0) {
 			const fileList = oversized.map((f) => `${f.name} (${f.lines} lines)`).join(", ");
 			appendBlock +=
 				`\n\n---\n> **Skill structure note:** ${fileList} exceeded ${SKILL_FILE_MAX_LINES} lines. ` +
-				`After completing the current task, consolidate this skill AND its skill-memory file (${SKILL_MEMORY_DIR}/${skillName}.md): ` +
-				`(1) deduplicate — merge overlapping entries and generalize specific examples into reusable principles, ` +
-				`(2) remove outdated information that no longer applies, ` +
-				`(3) classify the remaining content by task type and split into focused reference files, ` +
-				`(4) add a loading guide to SKILL.md so only task-relevant files are loaded each time.`;
+				`After completing the current task, apply progressive disclosure to this skill` +
+				`${lines.length > SKILL_MEMORY_MAX_LINES ? ` AND its skill-memory file (${SKILL_MEMORY_DIR}/${skillName}.md)` : ""}:\n` +
+				`> (1) **Classify each section**: is it needed on EVERY use of this skill, or only for specific task types? ` +
+				`Content needed every time stays in SKILL.md. Content needed only for specific tasks goes into reference files.\n` +
+				`> (2) **Deduplicate**: merge overlapping entries, generalize specific examples into reusable principles.\n` +
+				`> (3) **Remove outdated**: delete information that no longer applies.\n` +
+				`> (4) **Split conditionally-needed content** into focused reference files (e.g., references/setup.md, references/review-checklist.md). ` +
+				`Add "read references/X.md when Y" pointers in SKILL.md.\n` +
+				`> (5) **Compress what remains in SKILL.md**: tighten wording, remove redundancy, use tables instead of prose where possible.`;
 		}
 
 		const newContent = e.content.map((c) => {

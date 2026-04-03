@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawn } from "child_process";
 import { PROCESS_BUFFER_MAX } from "./constants.js";
 
@@ -230,16 +232,16 @@ class DockerExecutor implements Executor {
 
 	/**
 	 * Execute with auto-background: runs normally via docker exec, but if the
-	 * command exceeds BG_THRESHOLD_MS it switches to background mode.
+	 * command exceeds BG_THRESHOLD_MS it switches to background mode in-place.
 	 *
 	 * When backgrounding:
-	 * 1. The original docker exec (which streams output to the host) is killed.
-	 * 2. The command is re-launched inside the container via nohup, writing to an output file.
-	 * 3. The result is returned immediately with the output file path.
+	 * 1. The process keeps running (NOT killed).
+	 * 2. Accumulated stdout/stderr is flushed to an output file.
+	 * 3. Future stdout/stderr is appended to the file instead of memory.
+	 * 4. The result is returned immediately with the output file path.
 	 *
-	 * This approach avoids the host-PID / container-path mismatch: the backgrounded
-	 * process runs entirely inside the container, and the output file lives on /workspace
-	 * (shared volume), so the LLM can `cat` / `tail` it normally.
+	 * This preserves all output and avoids re-executing the command.
+	 * Inspired by carat-pi's sandbox approach.
 	 */
 	private execWithBackground(command: string, options?: ExecOptions): Promise<ExecResult> {
 		return new Promise((resolve, reject) => {
@@ -258,6 +260,10 @@ class DockerExecutor implements Executor {
 			let stdout = "";
 			let stderr = "";
 			let resolved = false;
+			let backgrounded = false;
+			let outputStream: ReturnType<typeof createWriteStream> | null = null;
+			let bgOutputFile: string | null = null;
+			let outputBytes = 0;
 
 			// Kill the host-side process tree (the docker exec process)
 			const killChild = () => {
@@ -281,35 +287,111 @@ class DockerExecutor implements Executor {
 				}
 			}
 
-			// Background threshold timer: if command takes too long, re-launch inside container
-			const bgTimer = setTimeout(async () => {
+			// Compaction: keep output file under BG_MAX_OUTPUT_BYTES
+			const TRUNCATION_HEADER = "--- earlier output truncated ---\n";
+			let compacting = false;
+			const pendingChunks: (Buffer | string)[] = [];
+
+			const compactBgOutput = () => {
+				if (!bgOutputFile || !outputStream) return;
+				compacting = true;
+				const stream = outputStream;
+				outputStream = null;
+				stream.end();
+				stream.once("finish", () => {
+					try {
+						const content = readFileSync(bgOutputFile!, "utf-8");
+						const keep = Math.floor(BG_MAX_OUTPUT_BYTES * 0.8);
+						const truncated = TRUNCATION_HEADER + content.slice(-keep);
+						writeFileSync(bgOutputFile!, truncated);
+						outputBytes = Buffer.byteLength(truncated);
+					} catch {}
+					try {
+						outputStream = createWriteStream(bgOutputFile!, { flags: "a" });
+						outputStream.on("error", () => {
+							outputStream = null;
+						});
+					} catch {
+						outputStream = null;
+					}
+					compacting = false;
+					for (const c of pendingChunks) appendBgOutput(c);
+					pendingChunks.length = 0;
+				});
+			};
+
+			const appendBgOutput = (chunk: Buffer | string) => {
+				if (compacting) {
+					pendingChunks.push(chunk);
+					return;
+				}
+				if (!outputStream) return;
+				outputStream.write(chunk);
+				outputBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+				if (outputBytes >= BG_COMPACT_TRIGGER) compactBgOutput();
+			};
+
+			// Hard kill timer: prevent infinite runs
+			let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+			// Background threshold timer: switch output to file, keep process alive
+			const bgTimer = setTimeout(() => {
 				if (resolved) return;
 				resolved = true;
+				backgrounded = true;
 
-				// Kill the current docker exec process (host-side)
-				killChild();
-
-				// Re-launch the command inside the container with nohup + output redirect
+				// Create output directory and file
+				const bgDir = BG_DIR_CONTAINER;
 				try {
-					const result = await this.launchInContainer(command);
-					resolve(result);
-				} catch (_err) {
-					// Fall back: return what we have so far
-					const partialOutput = stdout + (stderr ? `\nSTDERR:\n${stderr}` : "");
-					resolve({
-						stdout: "",
-						stderr: "",
-						code: 0,
-						backgrounded: true,
-						pid: 0,
-						outputFile: "(failed to background)",
-						partialOutput: partialOutput.slice(-BG_PARTIAL_OUTPUT_MAX),
+					mkdirSync(bgDir, { recursive: true });
+				} catch {}
+
+				const outputFile = join(bgDir, `${randomUUID()}.out`);
+				bgOutputFile = outputFile;
+				try {
+					outputStream = createWriteStream(outputFile, { flags: "w" });
+					outputStream.on("error", () => {
+						outputStream = null;
 					});
+				} catch {
+					outputStream = null;
 				}
+
+				// Flush accumulated output to file
+				const accumulated = stdout + (stderr ? `\nSTDERR:\n${stderr}` : "");
+				if (outputStream && accumulated) {
+					outputStream.write(accumulated);
+					outputBytes = Buffer.byteLength(accumulated);
+				}
+
+				// Set hard kill timer for backgrounded process
+				killTimer = setTimeout(() => {
+					killChild();
+				}, BG_EXTENDED_TIMEOUT_SECS * 1000);
+
+				// Get container PID (docker exec streams the container process)
+				// We report host PID — the LLM uses `kill -0 <pid>` to check status,
+				// which works for the host-side docker exec process.
+				let partialOutput = accumulated;
+				if (Buffer.byteLength(partialOutput) > BG_PARTIAL_OUTPUT_MAX) {
+					partialOutput = "... (truncated)\n" + partialOutput.slice(-BG_PARTIAL_OUTPUT_MAX);
+				}
+
+				resolve({
+					stdout: "",
+					stderr: "",
+					code: 0,
+					backgrounded: true,
+					pid,
+					outputFile,
+					partialOutput,
+				});
 			}, BG_THRESHOLD_MS);
 
 			child.stdout?.on("data", (data: Buffer) => {
-				if (!resolved) {
+				if (backgrounded) {
+					appendBgOutput(data);
+				} else {
 					stdout += data.toString();
 					if (stdout.length > PROCESS_BUFFER_MAX) {
 						stdout = stdout.slice(-PROCESS_BUFFER_MAX);
@@ -318,7 +400,9 @@ class DockerExecutor implements Executor {
 			});
 
 			child.stderr?.on("data", (data: Buffer) => {
-				if (!resolved) {
+				if (backgrounded) {
+					appendBgOutput(data);
+				} else {
 					stderr += data.toString();
 					if (stderr.length > PROCESS_BUFFER_MAX) {
 						stderr = stderr.slice(-PROCESS_BUFFER_MAX);
@@ -328,6 +412,14 @@ class DockerExecutor implements Executor {
 
 			child.on("error", (err) => {
 				clearTimeout(bgTimer);
+				if (killTimer) clearTimeout(killTimer);
+				if (backgrounded) {
+					if (outputStream) {
+						outputStream.end(`\n--- ERROR: ${err.message} ---\n`);
+						outputStream = null;
+					}
+					return;
+				}
 				if (!resolved) {
 					resolved = true;
 					reject(err);
@@ -336,8 +428,16 @@ class DockerExecutor implements Executor {
 
 			child.on("close", (code) => {
 				clearTimeout(bgTimer);
+				if (killTimer) clearTimeout(killTimer);
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", onAbort);
+				}
+				if (backgrounded) {
+					if (outputStream) {
+						outputStream.end(`\n--- EXIT CODE: ${code} ---\n`);
+						outputStream = null;
+					}
+					return;
 				}
 				if (!resolved) {
 					resolved = true;

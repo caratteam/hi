@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import { PROCESS_BUFFER_MAX } from "./constants.js";
 
 // Background mode constants
@@ -202,12 +202,56 @@ const BG_DIR_CONTAINER = "/workspace/.bg";
 
 class DockerExecutor implements Executor {
 	private envVars: Record<string, string>;
+	/** Host-side path that maps to /workspace inside the container (resolved lazily via docker inspect) */
+	private hostWorkspacePath: string | null = null;
 
 	constructor(
 		private container: string,
 		envVars?: Record<string, string>,
 	) {
 		this.envVars = envVars || {};
+	}
+
+	/**
+	 * Get the host-side path for /workspace (resolved once via `docker inspect`).
+	 * Falls back to /workspace if resolution fails.
+	 */
+	private getHostWorkspacePath(): string {
+		if (this.hostWorkspacePath !== null) return this.hostWorkspacePath;
+
+		try {
+			const output = execFileSync(
+				"docker",
+				[
+					"inspect",
+					"-f",
+					'{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}',
+					this.container,
+				],
+				{ encoding: "utf-8" },
+			).trim();
+
+			if (output) {
+				this.hostWorkspacePath = output;
+			} else {
+				this.hostWorkspacePath = "/workspace";
+			}
+		} catch {
+			this.hostWorkspacePath = "/workspace";
+		}
+		return this.hostWorkspacePath;
+	}
+
+	/**
+	 * Convert a container path (e.g., /workspace/.bg/xxx.out) to the host-side path.
+	 */
+	private containerPathToHost(containerPath: string): string {
+		const hostWs = this.getHostWorkspacePath();
+		if (containerPath.startsWith("/workspace/")) {
+			return join(hostWs, containerPath.slice("/workspace/".length));
+		}
+		if (containerPath === "/workspace") return hostWs;
+		return containerPath;
 	}
 
 	/**
@@ -340,16 +384,19 @@ class DockerExecutor implements Executor {
 				resolved = true;
 				backgrounded = true;
 
-				// Create output directory and file
-				const bgDir = BG_DIR_CONTAINER;
+				// Container path (shown to LLM) vs host path (used for file I/O)
+				const fileId = `${randomUUID()}.out`;
+				const containerOutputFile = `${BG_DIR_CONTAINER}/${fileId}`;
+				const hostBgDir = this.containerPathToHost(BG_DIR_CONTAINER);
+				const hostOutputFile = join(hostBgDir, fileId);
+
 				try {
-					mkdirSync(bgDir, { recursive: true });
+					mkdirSync(hostBgDir, { recursive: true });
 				} catch {}
 
-				const outputFile = join(bgDir, `${randomUUID()}.out`);
-				bgOutputFile = outputFile;
+				bgOutputFile = hostOutputFile;
 				try {
-					outputStream = createWriteStream(outputFile, { flags: "w" });
+					outputStream = createWriteStream(hostOutputFile, { flags: "w" });
 					outputStream.on("error", () => {
 						outputStream = null;
 					});
@@ -369,12 +416,9 @@ class DockerExecutor implements Executor {
 					killChild();
 				}, BG_EXTENDED_TIMEOUT_SECS * 1000);
 
-				// Get container PID (docker exec streams the container process)
-				// We report host PID — the LLM uses `kill -0 <pid>` to check status,
-				// which works for the host-side docker exec process.
 				let partialOutput = accumulated;
 				if (Buffer.byteLength(partialOutput) > BG_PARTIAL_OUTPUT_MAX) {
-					partialOutput = "... (truncated)\n" + partialOutput.slice(-BG_PARTIAL_OUTPUT_MAX);
+					partialOutput = `... (truncated)\n${partialOutput.slice(-BG_PARTIAL_OUTPUT_MAX)}`;
 				}
 
 				resolve({
@@ -383,7 +427,7 @@ class DockerExecutor implements Executor {
 					code: 0,
 					backgrounded: true,
 					pid,
-					outputFile,
+					outputFile: containerOutputFile,
 					partialOutput,
 				});
 			}, BG_THRESHOLD_MS);

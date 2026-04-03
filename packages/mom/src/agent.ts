@@ -173,6 +173,9 @@ function buildSystemPrompt(
 Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
 Do NOT use **double asterisks** or [markdown](links).
 
+## Scout
+When you need context not already in your conversation, use the scout skill to collect it first.
+
 ## Environment
 ${envDescription}
 

@@ -413,11 +413,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		const agents = discoverAllAgents();
 		const agentList = agents.map((a) => `  - ${a.name}: ${a.description}`).join("\n");
 		return [
-			"Delegate tasks to specialized subagents with isolated context windows.",
-			"The subagent runs in a separate process — its intermediate tool calls and exploration",
-			"do not enter your context. You receive only the final output.",
-			"Use when information is not in your current context.",
-			"Exception: reading 1 file is faster with the read tool directly.",
+			"Delegate tasks to subagents. They run in isolated contexts — you get only the final result.",
 			"",
 			"Available agents:",
 			agentList || "  (none — add *.md files to ~/.pi/agents/ or /workspace/agents/)",
@@ -426,7 +422,6 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 			'  - Single: { "agent": "name", "task": "..." }',
 			'  - Parallel: { "tasks": [{"agent": "name", "task": "..."}, ...] }',
 			'  - Chain: { "chain": [{"agent": "name", "task": "... {previous} ..."}, ...] }',
-			"Chain mode replaces {previous} with the output of the prior step.",
 		].join("\n");
 	}
 

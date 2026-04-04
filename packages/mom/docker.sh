@@ -58,6 +58,14 @@ case "$1" in
       echo "  Warning: ${AUTH_JSON} not found, OAuth tokens won't be available"
     fi
 
+    # Mount agents directory for subagent definitions (scout, etc.)
+    AGENTS_DIR="$HOME/.pi/agents"
+    AGENTS_MOUNT=""
+    if [ -d "$AGENTS_DIR" ]; then
+      AGENTS_MOUNT="-v ${AGENTS_DIR}:/root/.pi/agents:ro"
+      echo "  Agents dir: ${AGENTS_DIR} -> /root/.pi/agents"
+    fi
+
     docker run -d --init \
       --name "$CONTAINER_NAME" \
       --cpus=1.0 \
@@ -69,6 +77,7 @@ case "$1" in
       -v "${CLIENT_ROOT}:/carat-client" \
       -v "${ADMIN_ROOT}:/carat-admin" \
       ${AUTH_MOUNT} \
+      ${AGENTS_MOUNT} \
       "$IMAGE" \
       tail -f /dev/null
     

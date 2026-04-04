@@ -719,7 +719,9 @@ function createRunner(
 	const subagentExtension = createSubagentExtension({
 		agentsDirs: [join(homedir(), ".pi", "agents"), join(workspacePath, "agents")],
 		workspacePath,
+		hostWorkspacePath,
 		extensionPaths,
+		sandboxConfig,
 	});
 
 	// Collect extension tool descriptions for system prompt Tools section

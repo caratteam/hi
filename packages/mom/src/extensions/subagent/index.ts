@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Extension } from "@mariozechner/pi-coding-agent";
 import * as log from "../../log.js";
+import type { SandboxConfig } from "../../sandbox.js";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 
 // ---------------------------------------------------------------------------
@@ -131,17 +132,28 @@ async function runSingleAgent(
 	task: string,
 	options: {
 		cwd: string;
+		hostWorkspacePath: string;
+		sandboxConfig: SandboxConfig;
 		extensionPaths: string[];
 		signal?: AbortSignal;
 	},
 ): Promise<AgentResult> {
 	const timeout = agent.timeout ?? DEFAULT_TIMEOUT;
+	const isDocker = options.sandboxConfig.type === "docker";
 
-	// Write temp system prompt: agent body only (pi handles base prompt, skills, etc.)
-	const tmpDir = join(tmpdir(), "pi-subagent");
-	mkdirSync(tmpDir, { recursive: true });
-	const promptPath = join(tmpDir, `prompt-${agent.name}-${Date.now()}.md`);
-	writeFileSync(promptPath, agent.systemPrompt, "utf-8");
+	// Write temp system prompt.
+	// For docker: write to hostWorkspacePath/.tmp/subagent/ (visible in container as /workspace/.tmp/subagent/)
+	// For host: write to os tmpdir
+	const hostTmpDir = isDocker ? join(options.hostWorkspacePath, ".tmp", "subagent") : join(tmpdir(), "pi-subagent");
+	mkdirSync(hostTmpDir, { recursive: true });
+	const promptFileName = `prompt-${agent.name}-${Date.now()}.md`;
+	writeFileSync(join(hostTmpDir, promptFileName), agent.systemPrompt, "utf-8");
+	// Path as seen by the pi CLI process
+	const promptPath = isDocker
+		? join("/workspace", ".tmp", "subagent", promptFileName)
+		: join(hostTmpDir, promptFileName);
+	// Path for cleanup (host filesystem)
+	const hostPromptPath = join(hostTmpDir, promptFileName);
 
 	// Create trace log for post-mortem debugging
 	const traceLogPath = createTraceLogPath(agent.name);
@@ -156,27 +168,42 @@ async function runSingleAgent(
 	};
 
 	try {
-		const args: string[] = ["--mode", "json", "-p", "--no-session"];
-		if (agent.model) args.push("--model", agent.model);
-		if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+		const piCliArgs: string[] = ["--mode", "json", "-p", "--no-session"];
+		if (agent.model) piCliArgs.push("--model", agent.model);
+		if (agent.tools && agent.tools.length > 0) piCliArgs.push("--tools", agent.tools.join(","));
 
-		// Pass all mom extensions to the subagent
-		for (const extPath of options.extensionPaths) {
-			args.push("-e", extPath);
+		// Extensions only work for host mode (paths must be accessible)
+		if (!isDocker) {
+			for (const extPath of options.extensionPaths) {
+				piCliArgs.push("-e", extPath);
+			}
 		}
 
-		args.push("--append-system-prompt", promptPath);
-		args.push(`Task: ${task}`);
+		piCliArgs.push("--append-system-prompt", promptPath);
+		piCliArgs.push(`Task: ${task}`);
 
-		// Resolve pi invocation — reuse current process if possible
-		const piArgs = getPiInvocation(args);
+		// Build the spawn command
+		let spawnCmd: string;
+		let spawnArgs: string[];
+
+		if (isDocker) {
+			// Run pi CLI inside the container via docker exec
+			const container = (options.sandboxConfig as { type: "docker"; container: string }).container;
+			const piCli = "/pi-mono/packages/coding-agent/dist/cli.js";
+			spawnCmd = "docker";
+			spawnArgs = ["exec", container, "node", piCli, ...piCliArgs];
+		} else {
+			const piArgs = getPiInvocation(piCliArgs);
+			spawnCmd = piArgs.command;
+			spawnArgs = piArgs.args;
+		}
 
 		let wasAborted = false;
 		let wasTimeout = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn(piArgs.command, piArgs.args, {
-				cwd: options.cwd,
+			const proc = spawn(spawnCmd, spawnArgs, {
+				cwd: isDocker ? undefined : options.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
@@ -275,7 +302,7 @@ async function runSingleAgent(
 		}
 	} finally {
 		try {
-			unlinkSync(promptPath);
+			unlinkSync(hostPromptPath);
 		} catch {
 			/* ignore */
 		}
@@ -339,11 +366,13 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (it
 export interface SubagentExtensionConfig {
 	agentsDirs: string[];
 	workspacePath: string;
+	hostWorkspacePath: string;
 	extensionPaths: string[];
+	sandboxConfig: SandboxConfig;
 }
 
 export function createSubagentExtension(config: SubagentExtensionConfig): Extension {
-	const { agentsDirs, workspacePath, extensionPaths } = config;
+	const { agentsDirs, workspacePath, hostWorkspacePath, extensionPaths, sandboxConfig } = config;
 
 	// Discover agents from all configured directories, deduplicating by name (first wins)
 	function discoverAllAgents(): AgentConfig[] {
@@ -393,7 +422,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		const agents = discoverAllAgents();
 		const cwd = workspacePath;
 
-		const runOpts = { cwd, extensionPaths, signal };
+		const runOpts = { cwd, hostWorkspacePath, sandboxConfig, extensionPaths, signal };
 
 		function findAgent(name: string): AgentConfig | undefined {
 			return agents.find((a) => a.name === name);

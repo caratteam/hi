@@ -15,7 +15,8 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Extension } from "@mariozechner/pi-coding-agent";
 import * as log from "../../log.js";
 import { type AgentConfig, discoverAgents } from "./agents.js";
@@ -294,7 +295,8 @@ async function runSingleAgent(
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	// mom's process.argv[1] is mom's main.js, not the pi CLI.
 	// Resolve the pi CLI from the coding-agent package instead.
-	const piCli = join(__dirname, "..", "..", "..", "coding-agent", "dist", "cli.js");
+	const thisDir = dirname(fileURLToPath(import.meta.url));
+	const piCli = join(thisDir, "..", "..", "..", "coding-agent", "dist", "cli.js");
 	if (existsSync(piCli)) {
 		return { command: process.execPath, args: [piCli, ...args] };
 	}

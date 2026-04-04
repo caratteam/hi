@@ -292,9 +292,11 @@ async function runSingleAgent(
 // ---------------------------------------------------------------------------
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
-	if (currentScript && existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] };
+	// mom's process.argv[1] is mom's main.js, not the pi CLI.
+	// Resolve the pi CLI from the coding-agent package instead.
+	const piCli = join(__dirname, "..", "..", "..", "coding-agent", "dist", "cli.js");
+	if (existsSync(piCli)) {
+		return { command: process.execPath, args: [piCli, ...args] };
 	}
 	return { command: "pi", args };
 }

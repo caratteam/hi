@@ -722,6 +722,7 @@ function createRunner(
 		hostWorkspacePath,
 		extensionPaths,
 		sandboxConfig,
+		getDefaultProvider: () => settingsManager.getDefaultProvider(),
 	});
 
 	// Collect extension tool descriptions for system prompt Tools section

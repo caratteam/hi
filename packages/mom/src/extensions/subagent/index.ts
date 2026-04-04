@@ -136,6 +136,7 @@ async function runSingleAgent(
 		sandboxConfig: SandboxConfig;
 		extensionPaths: string[];
 		signal?: AbortSignal;
+		defaultProvider?: string;
 	},
 ): Promise<AgentResult> {
 	const timeout = agent.timeout ?? DEFAULT_TIMEOUT;
@@ -169,7 +170,17 @@ async function runSingleAgent(
 
 	try {
 		const piCliArgs: string[] = ["--mode", "json", "-p", "--no-session"];
-		if (agent.model) piCliArgs.push("--model", agent.model);
+		if (agent.model) {
+			// If a default provider is configured (from settings.json), prefer it by
+			// passing "provider/model" format.  The pi CLI model resolver will try
+			// the specified provider first and fall back to all providers if the model
+			// isn't available there (inferredProvider fallback path).
+			const modelArg =
+				options.defaultProvider && !agent.model.includes("/")
+					? `${options.defaultProvider}/${agent.model}`
+					: agent.model;
+			piCliArgs.push("--model", modelArg);
+		}
 		if (agent.tools && agent.tools.length > 0) piCliArgs.push("--tools", agent.tools.join(","));
 
 		// Extensions only work for host mode (paths must be accessible)
@@ -369,10 +380,12 @@ export interface SubagentExtensionConfig {
 	hostWorkspacePath: string;
 	extensionPaths: string[];
 	sandboxConfig: SandboxConfig;
+	/** Provider from settings.json (e.g. "anthropic", "openrouter"). Subagents will prefer this provider. */
+	getDefaultProvider?: () => string | undefined;
 }
 
 export function createSubagentExtension(config: SubagentExtensionConfig): Extension {
-	const { agentsDirs, workspacePath, hostWorkspacePath, extensionPaths, sandboxConfig } = config;
+	const { agentsDirs, workspacePath, hostWorkspacePath, extensionPaths, sandboxConfig, getDefaultProvider } = config;
 
 	// Discover agents from all configured directories, deduplicating by name (first wins)
 	function discoverAllAgents(): AgentConfig[] {
@@ -422,7 +435,8 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		const agents = discoverAllAgents();
 		const cwd = workspacePath;
 
-		const runOpts = { cwd, hostWorkspacePath, sandboxConfig, extensionPaths, signal };
+		const defaultProvider = getDefaultProvider?.();
+		const runOpts = { cwd, hostWorkspacePath, sandboxConfig, extensionPaths, signal, defaultProvider };
 
 		function findAgent(name: string): AgentConfig | undefined {
 			return agents.find((a) => a.name === name);

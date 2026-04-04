@@ -27,9 +27,13 @@ import { type AgentConfig, discoverAgents } from "./agents.js";
 const SUBAGENT_LOG_DIR = "/workspace/logs/subagent";
 const SUBAGENT_LOG_RETENTION_DAYS = 7;
 
-/** Create a trace log file path for a subagent run. */
+/** Create a trace log file path for a subagent run. Returns empty string on failure. */
 function createTraceLogPath(agentName: string): string {
-	mkdirSync(SUBAGENT_LOG_DIR, { recursive: true });
+	try {
+		mkdirSync(SUBAGENT_LOG_DIR, { recursive: true });
+	} catch {
+		return "";
+	}
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
 	return join(SUBAGENT_LOG_DIR, `${ts}_${agentName}.jsonl`);
 }

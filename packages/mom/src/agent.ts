@@ -717,7 +717,7 @@ function createRunner(
 
 	// Subagent extension — delegates tasks to isolated agent processes
 	const subagentExtension = createSubagentExtension({
-		agentsDirs: [join(homedir(), ".pi", "agents"), join(workspacePath, "agents")],
+		agentsDirs: [join(homedir(), ".pi", "agents"), join(hostWorkspacePath, "agents")],
 		workspacePath,
 		hostWorkspacePath,
 		extensionPaths,

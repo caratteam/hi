@@ -26,18 +26,20 @@ import { type AgentConfig, discoverAgents } from "./agents.js";
 // Subagent trace logging
 // ---------------------------------------------------------------------------
 
-const SUBAGENT_LOG_DIR = "/workspace/logs/subagent";
 const SUBAGENT_LOG_RETENTION_DAYS = 7;
+
+/** Resolved at extension init time via hostWorkspacePath. */
+let subagentLogDir = "/workspace/logs/subagent";
 
 /** Create a trace log file path for a subagent run. Returns empty string on failure. */
 function createTraceLogPath(agentName: string): string {
 	try {
-		mkdirSync(SUBAGENT_LOG_DIR, { recursive: true });
+		mkdirSync(subagentLogDir, { recursive: true });
 	} catch {
 		return "";
 	}
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
-	return join(SUBAGENT_LOG_DIR, `${ts}_${agentName}.jsonl`);
+	return join(subagentLogDir, `${ts}_${agentName}.jsonl`);
 }
 
 /** Append a single line to the trace log (best-effort). */
@@ -82,9 +84,9 @@ function writeTraceFooter(logPath: string, result: AgentResult): void {
 function cleanupOldTraceLogs(): void {
 	try {
 		const cutoff = Date.now() - SUBAGENT_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-		for (const file of readdirSync(SUBAGENT_LOG_DIR)) {
+		for (const file of readdirSync(subagentLogDir)) {
 			if (!file.endsWith(".jsonl")) continue;
-			const filePath = join(SUBAGENT_LOG_DIR, file);
+			const filePath = join(subagentLogDir, file);
 			try {
 				if (statSync(filePath).mtimeMs < cutoff) unlinkSync(filePath);
 			} catch {
@@ -386,6 +388,10 @@ export interface SubagentExtensionConfig {
 
 export function createSubagentExtension(config: SubagentExtensionConfig): Extension {
 	const { agentsDirs, workspacePath, hostWorkspacePath, extensionPaths, sandboxConfig, getDefaultProvider } = config;
+
+	// Resolve trace log directory on the HOST filesystem so logs are visible
+	// inside the container (hostWorkspacePath is the mounted data dir on host).
+	subagentLogDir = join(hostWorkspacePath, "logs", "subagent");
 
 	// Discover agents from all configured directories, deduplicating by name (first wins)
 	function discoverAllAgents(): AgentConfig[] {

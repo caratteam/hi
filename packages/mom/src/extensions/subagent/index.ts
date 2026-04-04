@@ -13,12 +13,82 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Extension } from "@mariozechner/pi-coding-agent";
 import * as log from "../../log.js";
 import { type AgentConfig, discoverAgents } from "./agents.js";
+
+// ---------------------------------------------------------------------------
+// Subagent trace logging
+// ---------------------------------------------------------------------------
+
+const SUBAGENT_LOG_DIR = "/workspace/logs/subagent";
+const SUBAGENT_LOG_RETENTION_DAYS = 7;
+
+/** Create a trace log file path for a subagent run. */
+function createTraceLogPath(agentName: string): string {
+	mkdirSync(SUBAGENT_LOG_DIR, { recursive: true });
+	const ts = new Date().toISOString().replace(/[:.]/g, "-");
+	return join(SUBAGENT_LOG_DIR, `${ts}_${agentName}.jsonl`);
+}
+
+/** Append a single line to the trace log (best-effort). */
+function appendTrace(logPath: string, line: string): void {
+	try {
+		appendFileSync(logPath, `${line}\n`, "utf-8");
+	} catch {
+		/* best effort */
+	}
+}
+
+/** Write metadata header to trace log. */
+function writeTraceHeader(logPath: string, agentName: string, task: string, model?: string): void {
+	appendTrace(
+		logPath,
+		JSON.stringify({
+			_trace: "header",
+			agent: agentName,
+			task,
+			model: model || null,
+			startedAt: new Date().toISOString(),
+		}),
+	);
+}
+
+/** Write summary footer to trace log. */
+function writeTraceFooter(logPath: string, result: AgentResult): void {
+	appendTrace(
+		logPath,
+		JSON.stringify({
+			_trace: "footer",
+			exitCode: result.exitCode,
+			stopReason: result.stopReason || null,
+			errorMessage: result.errorMessage || null,
+			usage: result.usage,
+			finishedAt: new Date().toISOString(),
+		}),
+	);
+}
+
+/** Delete trace logs older than retention period. */
+function cleanupOldTraceLogs(): void {
+	try {
+		const cutoff = Date.now() - SUBAGENT_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+		for (const file of readdirSync(SUBAGENT_LOG_DIR)) {
+			if (!file.endsWith(".jsonl")) continue;
+			const filePath = join(SUBAGENT_LOG_DIR, file);
+			try {
+				if (statSync(filePath).mtimeMs < cutoff) unlinkSync(filePath);
+			} catch {
+				/* skip */
+			}
+		}
+	} catch {
+		/* dir doesn't exist yet */
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,6 +138,10 @@ async function runSingleAgent(
 	const promptPath = join(tmpDir, `prompt-${agent.name}-${Date.now()}.md`);
 	writeFileSync(promptPath, agent.systemPrompt, "utf-8");
 
+	// Create trace log for post-mortem debugging
+	const traceLogPath = createTraceLogPath(agent.name);
+	writeTraceHeader(traceLogPath, agent.name, task, agent.model);
+
 	const result: AgentResult = {
 		agent: agent.name,
 		task,
@@ -112,6 +186,9 @@ async function runSingleAgent(
 				} catch {
 					return;
 				}
+
+				// Log every event to trace file for debugging
+				appendTrace(traceLogPath, line);
 
 				if (event.type === "message_end" && event.message?.role === "assistant") {
 					const msg = event.message;
@@ -198,6 +275,10 @@ async function runSingleAgent(
 			/* ignore */
 		}
 	}
+
+	// Write trace footer and log the path for easy discovery
+	writeTraceFooter(traceLogPath, result);
+	log.logInfo(`[subagent:${agent.name}] trace: ${traceLogPath}`);
 
 	return result;
 }
@@ -288,6 +369,8 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		params: any,
 		signal: AbortSignal | undefined,
 	): Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> {
+		cleanupOldTraceLogs();
+
 		const agents = discoverAllAgents();
 		const cwd = workspacePath;
 

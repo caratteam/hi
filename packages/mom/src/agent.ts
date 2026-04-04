@@ -806,6 +806,7 @@ function createRunner(
 			cacheWrite: number;
 			cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 		};
+		subagentUsage: Array<{ agent: string; turns: number; input: number; output: number; cost: number }>;
 		stopReason: string;
 		errorMessage: string | undefined;
 	} = {
@@ -820,6 +821,7 @@ function createRunner(
 			cacheWrite: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
+		subagentUsage: [],
 		stopReason: "stop",
 		errorMessage: undefined,
 	};
@@ -866,6 +868,23 @@ function createRunner(
 
 			if (agentEvent.isError) {
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
+			}
+
+			// Collect subagent usage from tool result details
+			if (pending?.toolName === "subagent" && agentEvent.result?.details) {
+				const details = agentEvent.result.details;
+				const results: any[] = Array.isArray(details) ? details : [details];
+				for (const r of results) {
+					if (r?.usage && r?.agent) {
+						state.subagentUsage.push({
+							agent: r.agent,
+							turns: r.usage.turns || 0,
+							input: r.usage.input || 0,
+							output: r.usage.output || 0,
+							cost: r.usage.cost || 0,
+						});
+					}
+				}
 			}
 		} else if (event.type === "message_start") {
 			const agentEvent = event as AgentEvent & { type: "message_start" };
@@ -1072,6 +1091,7 @@ function createRunner(
 				cacheWrite: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
+			runState.subagentUsage = [];
 			runState.stopReason = "stop";
 			runState.errorMessage = undefined;
 
@@ -1290,6 +1310,7 @@ function createRunner(
 					contextWindow,
 					actualModel.id,
 					join(channelDir, "..", "daily-usage.json"),
+					runState.subagentUsage.length > 0 ? runState.subagentUsage : undefined,
 				);
 				if (ctx.message.channel === USAGE_SUMMARY_CHANNEL) {
 					// Already in hansol DM - post in thread as before

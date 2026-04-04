@@ -240,6 +240,7 @@ export function logUsageSummary(
 	contextWindow?: number,
 	modelName?: string,
 	dailyUsageFile?: string,
+	subagentUsage?: Array<{ agent: string; turns: number; input: number; output: number; cost: number }>,
 ): string {
 	const formatTokens = (count: number): string => {
 		if (count < 1000) return count.toString();
@@ -269,9 +270,24 @@ export function logUsageSummary(
 	);
 	lines.push(`*Total: $${usage.cost.total.toFixed(4)}*`);
 
-	// Daily cumulative cost
+	// Subagent usage breakdown
+	if (subagentUsage && subagentUsage.length > 0) {
+		const totalSubCost = subagentUsage.reduce((sum, s) => sum + s.cost, 0);
+		lines.push("");
+		lines.push(`*Subagents* (${subagentUsage.length} calls, $${totalSubCost.toFixed(4)})`);
+		for (const s of subagentUsage) {
+			lines.push(
+				`  ${s.agent}: ${s.turns}t, ${formatTokens(s.input)} in, ${formatTokens(s.output)} out, $${s.cost.toFixed(4)}`,
+			);
+		}
+		lines.push(`*Grand Total: $${(usage.cost.total + totalSubCost).toFixed(4)}*`);
+	}
+
+	// Daily cumulative cost (includes subagent)
+	const totalCostWithSubagents =
+		usage.cost.total + (subagentUsage ? subagentUsage.reduce((sum, s) => sum + s.cost, 0) : 0);
 	if (dailyUsageFile) {
-		const daily = updateDailyUsage(dailyUsageFile, usage.cost.total);
+		const daily = updateDailyUsage(dailyUsageFile, totalCostWithSubagents);
 		lines.push(`_${daily.date} 누적: $${daily.totalCost.toFixed(4)}_`);
 	}
 

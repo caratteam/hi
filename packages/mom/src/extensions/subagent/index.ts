@@ -295,8 +295,19 @@ async function runSingleAgent(
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	// mom's process.argv[1] is mom's main.js, not the pi CLI.
 	// Resolve the pi CLI from the coding-agent package instead.
-	const thisDir = dirname(fileURLToPath(import.meta.url));
-	const piCli = join(thisDir, "..", "..", "..", "coding-agent", "dist", "cli.js");
+	// Resolve pi CLI: find the monorepo root via package.json, then coding-agent/dist/cli.js
+	let piCli = "";
+	let dir = dirname(fileURLToPath(import.meta.url));
+	for (let i = 0; i < 10; i++) {
+		const candidate = join(dir, "packages", "coding-agent", "dist", "cli.js");
+		if (existsSync(candidate)) {
+			piCli = candidate;
+			break;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
 	if (existsSync(piCli)) {
 		return { command: process.execPath, args: [piCli, ...args] };
 	}

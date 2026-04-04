@@ -13,11 +13,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Extension, Skill } from "@mariozechner/pi-coding-agent";
-import { formatSkillsForPrompt } from "@mariozechner/pi-coding-agent";
+import type { Extension } from "@mariozechner/pi-coding-agent";
 import * as log from "../../log.js";
 import { type AgentConfig, discoverAgents } from "./agents.js";
 
@@ -46,40 +45,6 @@ interface AgentResult {
 }
 
 // ---------------------------------------------------------------------------
-// Common header for subagent system prompts
-// ---------------------------------------------------------------------------
-
-function buildCommonHeader(workspacePath: string, skills: Skill[]): string {
-	const date = new Date().toISOString().slice(0, 10);
-
-	let memory = "";
-	try {
-		memory = readFileSync(join(workspacePath, "MEMORY.md"), "utf-8");
-	} catch {
-		// no memory file
-	}
-
-	const parts = [
-		`Current date: ${date}`,
-		"",
-		"## Workspace Layout",
-		`${workspacePath}/`,
-		"├── MEMORY.md",
-		"├── skills/",
-		"├── agents/",
-		"└── [channel dirs]",
-		"",
-		"## Skills",
-		formatSkillsForPrompt(skills),
-		"",
-		"## Memory",
-		memory,
-	];
-
-	return parts.join("\n");
-}
-
-// ---------------------------------------------------------------------------
 // Run a single agent
 // ---------------------------------------------------------------------------
 
@@ -92,17 +57,16 @@ async function runSingleAgent(
 	options: {
 		cwd: string;
 		extensionPaths: string[];
-		commonHeader: string;
 		signal?: AbortSignal;
 	},
 ): Promise<AgentResult> {
 	const timeout = agent.timeout ?? DEFAULT_TIMEOUT;
 
-	// Write temp system prompt: [common header] + [agent body]
+	// Write temp system prompt: agent body only (pi handles base prompt, skills, etc.)
 	const tmpDir = join(tmpdir(), "pi-subagent");
 	mkdirSync(tmpDir, { recursive: true });
 	const promptPath = join(tmpDir, `prompt-${agent.name}-${Date.now()}.md`);
-	writeFileSync(promptPath, `${options.commonHeader}\n\n${agent.systemPrompt}`, "utf-8");
+	writeFileSync(promptPath, agent.systemPrompt, "utf-8");
 
 	const result: AgentResult = {
 		agent: agent.name,
@@ -273,18 +237,32 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (it
 // ---------------------------------------------------------------------------
 
 export interface SubagentExtensionConfig {
-	agentsDir: string;
+	agentsDirs: string[];
 	workspacePath: string;
-	skills: Skill[];
 	extensionPaths: string[];
 }
 
 export function createSubagentExtension(config: SubagentExtensionConfig): Extension {
-	const { agentsDir, workspacePath, skills, extensionPaths } = config;
+	const { agentsDirs, workspacePath, extensionPaths } = config;
+
+	// Discover agents from all configured directories, deduplicating by name (first wins)
+	function discoverAllAgents(): AgentConfig[] {
+		const seen = new Set<string>();
+		const all: AgentConfig[] = [];
+		for (const dir of agentsDirs) {
+			for (const agent of discoverAgents(dir)) {
+				if (!seen.has(agent.name)) {
+					seen.add(agent.name);
+					all.push(agent);
+				}
+			}
+		}
+		return all;
+	}
 
 	// Build agent list for tool description (dynamic — updates on each discover)
 	function getDescription(): string {
-		const agents = discoverAgents(agentsDir);
+		const agents = discoverAllAgents();
 		const agentList = agents.map((a) => `  - ${a.name}: ${a.description}`).join("\n");
 		return [
 			"Delegate tasks to specialized subagents with isolated context windows.",
@@ -294,7 +272,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 			"Exception: reading 1 file is faster with the read tool directly.",
 			"",
 			"Available agents:",
-			agentList || "  (none — add *.md files to /workspace/agents/)",
+			agentList || "  (none — add *.md files to ~/.pi/agents/ or /workspace/agents/)",
 			"",
 			"Modes:",
 			'  - Single: { "agent": "name", "task": "..." }',
@@ -310,11 +288,10 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		params: any,
 		signal: AbortSignal | undefined,
 	): Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> {
-		const agents = discoverAgents(agentsDir);
-		const commonHeader = buildCommonHeader(workspacePath, skills);
+		const agents = discoverAllAgents();
 		const cwd = workspacePath;
 
-		const runOpts = { cwd, extensionPaths, commonHeader, signal };
+		const runOpts = { cwd, extensionPaths, signal };
 
 		function findAgent(name: string): AgentConfig | undefined {
 			return agents.find((a) => a.name === name);

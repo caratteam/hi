@@ -717,9 +717,8 @@ function createRunner(
 
 	// Subagent extension — delegates tasks to isolated agent processes
 	const subagentExtension = createSubagentExtension({
-		agentsDir: join(workspacePath, "agents"),
+		agentsDirs: [join(homedir(), ".pi", "agents"), join(workspacePath, "agents")],
 		workspacePath,
-		skills,
 		extensionPaths,
 	});
 
@@ -775,7 +774,17 @@ function createRunner(
 		baseToolsOverride,
 	});
 
-	log.logInfo(`[${channelId}:${threadTs}] Created thread runner`);
+	// Capture extension tools (e.g. subagent) that were registered during session init.
+	// We need these because threadAgent.setTools() is called per-request with only base tools,
+	// which would otherwise drop extension tools from the active set.
+	const extensionToolNames = new Set(
+		threadAgent.state.tools.map((t) => t.name).filter((name) => !tools.some((bt) => bt.name === name)),
+	);
+	const extensionToolsFromRegistry = threadAgent.state.tools.filter((t) => extensionToolNames.has(t.name));
+
+	log.logInfo(
+		`[${channelId}:${threadTs}] Created thread runner (extension tools: ${[...extensionToolNames].join(", ") || "none"})`,
+	);
 
 	// Mutable per-run state - event handler references this
 	// Safe because each runner handles only one thread, and runs are sequential within a thread
@@ -1012,11 +1021,12 @@ function createRunner(
 			applySystemPrompt(threadAgent, threadTs);
 
 			// Swap tools based on read-only mode (non-admin users)
+			// Always include extension tools (e.g. subagent) alongside base tools
 			if (ctx.readOnly) {
-				threadAgent.setTools(readOnlyTools);
+				threadAgent.setTools([...readOnlyTools, ...extensionToolsFromRegistry]);
 				log.logInfo(`[${channelId}:${threadTs}] Read-only mode: restricted tools`);
 			} else {
-				threadAgent.setTools(tools);
+				threadAgent.setTools([...tools, ...extensionToolsFromRegistry]);
 			}
 
 			// Dynamic model override from settings.json

@@ -16,7 +16,8 @@ import {
 import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { BASE64_STRIP_THRESHOLD, DEFAULT_CONTEXT_WINDOW, SLACK_MAX_TEXT } from "./constants.js";
 import { MomSettingsManager, syncLogToSessionManager } from "./context.js";
 import { createSkillMemoryExtension } from "./extensions/skill-memory.js";
@@ -711,7 +712,8 @@ function createRunner(
 
 	// Collect extension file paths for subagent to inherit via -e flag.
 	// Only top-level .ts files in extensions/ — subdirectories (like subagent/) are excluded.
-	const extensionPaths = [join(__dirname, "extensions", "skill-memory.ts")].filter(existsSync);
+	const currentDir = dirname(fileURLToPath(import.meta.url));
+	const extensionPaths = [join(currentDir, "extensions", "skill-memory.ts")].filter(existsSync);
 
 	// Subagent extension — delegates tasks to isolated agent processes
 	const subagentExtension = createSubagentExtension({

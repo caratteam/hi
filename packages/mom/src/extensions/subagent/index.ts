@@ -569,6 +569,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		parameters: {
 			type: "object" as const,
 			properties: {
+				label: { type: "string", description: "Brief description of the delegated task (shown to user)" },
 				agent: { type: "string", description: "Agent name (for single mode)" },
 				task: { type: "string", description: "Task to delegate (for single mode)" },
 				tasks: {

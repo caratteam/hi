@@ -839,7 +839,8 @@ function createRunner(
 		if (event.type === "tool_execution_start") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
 			const args = agentEvent.args as { label?: string };
-			const label = args.label || agentEvent.toolName;
+			const rawLabel = args.label || agentEvent.toolName;
+			const label = agentEvent.toolName === "subagent" ? `[Subagent] ${rawLabel}` : rawLabel;
 
 			pendingTools.set(agentEvent.toolCallId, {
 				toolName: agentEvent.toolName,

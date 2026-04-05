@@ -74,6 +74,15 @@ export class EventsWatcher {
 			if (!filename || !filename.endsWith(".json")) return;
 			this.debounce(filename, () => this.handleFileChange(filename));
 		});
+		this.watcher.on("error", () => {
+			try {
+				this.watcher?.close();
+			} catch {
+				/* ignore */
+			}
+			this.watcher = null;
+			log.logWarning("Events watcher error — watcher stopped. Events will not be detected until restart.");
+		});
 
 		log.logInfo(`Events watcher started, tracking ${this.knownFiles.size} files`);
 	}

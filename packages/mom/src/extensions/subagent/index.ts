@@ -27,11 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Extension } from "@mariozechner/pi-coding-agent";
-import {
-	SUBAGENT_OUTPUT_RETENTION_DAYS,
-	SUBAGENT_OUTPUT_SUMMARY_MAX,
-	SUBAGENT_OUTPUT_THRESHOLD,
-} from "../../constants.js";
+import { SUBAGENT_OUTPUT_RETENTION_DAYS } from "../../constants.js";
 import * as log from "../../log.js";
 import type { SandboxConfig } from "../../sandbox.js";
 import { type AgentConfig, discoverAgents } from "./agents.js";
@@ -140,45 +136,51 @@ function cleanupOldOutputFiles(): void {
 	}
 }
 
-/**
- * Write large subagent output to a file and return a summary with file pointer.
- * If output is below threshold, returns it unchanged.
- */
-function compactOutput(output: string, agentName: string): string {
-	if (!output || output.length < SUBAGENT_OUTPUT_THRESHOLD) return output;
+/** Markers for structured subagent output format. */
+const SUMMARY_MARKER = "<SUMMARY>";
+const DETAILS_MARKER = "<DETAILS>";
 
-	// Write full output to file
+/**
+ * Write full output to a file. Returns the container-internal file path, or empty string on failure.
+ */
+function writeOutputFile(output: string, agentName: string): string {
 	try {
 		mkdirSync(subagentOutputDir, { recursive: true });
 	} catch {
-		// Can't create dir — return raw output as fallback
-		return output;
+		return "";
 	}
-
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
 	const fileName = `${ts}_${agentName}.md`;
-	const hostFilePath = join(subagentOutputDir, fileName);
-	const containerFilePath = join(subagentOutputContainerDir, fileName);
-
 	try {
-		writeFileSync(hostFilePath, output, "utf-8");
+		writeFileSync(join(subagentOutputDir, fileName), output, "utf-8");
+		return join(subagentOutputContainerDir, fileName);
 	} catch {
-		// Write failed — return raw output as fallback
-		return output;
+		return "";
+	}
+}
+
+/**
+ * Compact subagent output for the main agent's context.
+ *
+ * - If output contains <SUMMARY> and <DETAILS> markers:
+ *   Extract the summary section (no length cap), save full output to file.
+ * - If no markers: return full output as-is.
+ */
+function compactOutput(output: string, agentName: string): string {
+	if (!output) return output;
+
+	const summaryIdx = output.indexOf(SUMMARY_MARKER);
+	const detailsIdx = output.indexOf(DETAILS_MARKER);
+
+	if (summaryIdx !== -1 && detailsIdx !== -1 && detailsIdx > summaryIdx) {
+		const summary = output.slice(summaryIdx + SUMMARY_MARKER.length, detailsIdx).trim();
+		const filePath = writeOutputFile(output, agentName);
+		if (!filePath) return summary || output;
+		return `[${agentName} — full output: ${filePath}]\n\n${summary}`;
 	}
 
-	// Build summary: truncated preview + file pointer
-	const preview = output.slice(0, SUBAGENT_OUTPUT_SUMMARY_MAX);
-	const truncatedAt = preview.lastIndexOf("\n");
-	const cleanPreview = truncatedAt > SUBAGENT_OUTPUT_SUMMARY_MAX / 2 ? preview.slice(0, truncatedAt) : preview;
-
-	return [
-		`[${agentName} output — ${output.length} chars, saved to ${containerFilePath}]`,
-		"",
-		cleanPreview,
-		"",
-		`[... truncated — use read tool on ${containerFilePath} for full output]`,
-	].join("\n");
+	// No structured markers — return full output unchanged
+	return output;
 }
 
 // ---------------------------------------------------------------------------

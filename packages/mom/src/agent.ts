@@ -305,6 +305,17 @@ grep -i "topic" log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user
 grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text}'
 \`\`\`
 
+## Subagent Orchestration
+Delegate to subagents when the task benefits from isolated context or parallel investigation.
+
+Patterns:
+- Research/lookup: explore
+- Complex implementation: explore → plan → (user confirms) → executor
+- Code review: code-reviewer
+
+When chaining, pass prior results in the next agent's task description.
+Run independent explore tasks in parallel when investigating multiple areas.
+
 ## Tools
 - bash: Run shell commands (primary tool). Install packages as needed.
 - read: Read files

@@ -13,7 +13,16 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,6 +132,102 @@ interface AgentResult {
 }
 
 // ---------------------------------------------------------------------------
+// Skills injection — build <available_skills> section for subagent prompts
+// ---------------------------------------------------------------------------
+
+/** Cached skills section string. Rebuilt when stale (>60s). */
+let cachedSkillsSection = "";
+let cachedSkillsTimestamp = 0;
+const SKILLS_CACHE_TTL_MS = 60_000;
+
+function parseFrontmatterSimple(content: string): Record<string, string> {
+	const match = content.match(/^---\n([\s\S]*?)\n---/);
+	if (!match) return {};
+	const fm: Record<string, string> = {};
+	for (const line of match[1].split("\n")) {
+		const idx = line.indexOf(":");
+		if (idx === -1) continue;
+		const key = line.slice(0, idx).trim();
+		let value = line.slice(idx + 1).trim();
+		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+			value = value.slice(1, -1);
+		}
+		if (key) fm[key] = value;
+	}
+	return fm;
+}
+
+function escapeXml(str: string): string {
+	return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Scan /workspace/skills/ and build an <available_skills> section
+ * that tells subagents which skills exist and where to read them.
+ */
+function buildAvailableSkillsSection(workspacePath: string): string {
+	const now = Date.now();
+	if (cachedSkillsSection && now - cachedSkillsTimestamp < SKILLS_CACHE_TTL_MS) {
+		return cachedSkillsSection;
+	}
+
+	const skillsDir = join(workspacePath, "skills");
+	if (!existsSync(skillsDir)) {
+		cachedSkillsSection = "";
+		cachedSkillsTimestamp = now;
+		return "";
+	}
+
+	const skills: Array<{ name: string; description: string; location: string }> = [];
+	try {
+		for (const entry of readdirSync(skillsDir)) {
+			const entryPath = join(skillsDir, entry);
+			try {
+				if (!statSync(entryPath).isDirectory()) continue;
+			} catch {
+				continue;
+			}
+			const skillMdPath = join(entryPath, "SKILL.md");
+			if (!existsSync(skillMdPath)) continue;
+			try {
+				const content = readFileSync(skillMdPath, "utf-8");
+				const fm = parseFrontmatterSimple(content);
+				if (fm.name && fm.description) {
+					skills.push({ name: fm.name, description: fm.description, location: skillMdPath });
+				}
+			} catch {}
+		}
+	} catch {
+		// skillsDir not readable
+	}
+
+	if (skills.length === 0) {
+		cachedSkillsSection = "";
+		cachedSkillsTimestamp = now;
+		return "";
+	}
+
+	const lines = [
+		"The following skills provide specialized instructions for specific tasks.",
+		"Use the read tool to load a skill's file when the task matches its description.",
+		"",
+		"<available_skills>",
+	];
+	for (const s of skills) {
+		lines.push("  <skill>");
+		lines.push(`    <name>${escapeXml(s.name)}</name>`);
+		lines.push(`    <description>${escapeXml(s.description)}</description>`);
+		lines.push(`    <location>${escapeXml(s.location)}</location>`);
+		lines.push("  </skill>");
+	}
+	lines.push("</available_skills>");
+
+	cachedSkillsSection = lines.join("\n");
+	cachedSkillsTimestamp = now;
+	return cachedSkillsSection;
+}
+
+// ---------------------------------------------------------------------------
 // Run a single agent
 // ---------------------------------------------------------------------------
 
@@ -150,7 +255,10 @@ async function runSingleAgent(
 	const hostTmpDir = isDocker ? join(options.hostWorkspacePath, ".tmp", "subagent") : join(tmpdir(), "pi-subagent");
 	mkdirSync(hostTmpDir, { recursive: true });
 	const promptFileName = `prompt-${agent.name}-${Date.now()}.md`;
-	writeFileSync(join(hostTmpDir, promptFileName), agent.systemPrompt, "utf-8");
+	// Prepend <available_skills> so subagents can discover and read skill files
+	const skillsSection = buildAvailableSkillsSection(isDocker ? "/workspace" : options.hostWorkspacePath);
+	const fullPrompt = skillsSection ? `${skillsSection}\n\n${agent.systemPrompt}` : agent.systemPrompt;
+	writeFileSync(join(hostTmpDir, promptFileName), fullPrompt, "utf-8");
 	// Path as seen by the pi CLI process
 	const promptPath = isDocker
 		? join("/workspace", ".tmp", "subagent", promptFileName)

@@ -853,7 +853,20 @@ function createRunner(
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
 			const args = agentEvent.args as { label?: string };
 			const rawLabel = args.label || agentEvent.toolName;
-			const label = agentEvent.toolName === "subagent" ? `[Subagent] ${rawLabel}` : rawLabel;
+			let label = rawLabel;
+			if (agentEvent.toolName === "subagent") {
+				const subArgs = agentEvent.args as {
+					agent?: string;
+					tasks?: { agent: string }[];
+					chain?: { agent: string }[];
+				};
+				const agentType =
+					subArgs.agent ||
+					(subArgs.tasks ? subArgs.tasks.map((t) => t.agent).join(", ") : null) ||
+					(subArgs.chain ? subArgs.chain.map((t) => t.agent).join(" → ") : null) ||
+					"unknown";
+				label = `[Subagent — ${agentType}] ${rawLabel}`;
+			}
 
 			pendingTools.set(agentEvent.toolCallId, {
 				toolName: agentEvent.toolName,

@@ -31,6 +31,20 @@ export const BASE64_STRIP_THRESHOLD = 1000;
 export const PROCESS_BUFFER_MAX = 10 * 1024 * 1024;
 
 // ----------------------------------------------------------------------------
+// Subagent output file-as-memory
+// ----------------------------------------------------------------------------
+
+/** Char threshold above which subagent output is written to a file and
+ *  only a truncated summary + file pointer is returned to the main agent. */
+export const SUBAGENT_OUTPUT_THRESHOLD = 4000;
+
+/** Max chars of the original output to include in the summary prefix. */
+export const SUBAGENT_OUTPUT_SUMMARY_MAX = 800;
+
+/** How many days to keep subagent output files before cleanup. */
+export const SUBAGENT_OUTPUT_RETENTION_DAYS = 2;
+
+// ----------------------------------------------------------------------------
 // Model defaults
 // ----------------------------------------------------------------------------
 

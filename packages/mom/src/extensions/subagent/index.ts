@@ -27,6 +27,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Extension } from "@mariozechner/pi-coding-agent";
+import {
+	SUBAGENT_OUTPUT_RETENTION_DAYS,
+	SUBAGENT_OUTPUT_SUMMARY_MAX,
+	SUBAGENT_OUTPUT_THRESHOLD,
+} from "../../constants.js";
 import * as log from "../../log.js";
 import type { SandboxConfig } from "../../sandbox.js";
 import { type AgentConfig, discoverAgents } from "./agents.js";
@@ -105,6 +110,75 @@ function cleanupOldTraceLogs(): void {
 	} catch {
 		/* dir doesn't exist yet */
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Subagent output file-as-memory
+// ---------------------------------------------------------------------------
+
+/** Resolved at extension init time via hostWorkspacePath. */
+let subagentOutputDir = "/workspace/logs/subagent-output";
+
+/** Container-internal base path — used in file pointers returned to the main agent. */
+let subagentOutputContainerDir = "/workspace/logs/subagent-output";
+
+/** Delete output files older than retention period. */
+function cleanupOldOutputFiles(): void {
+	try {
+		const cutoff = Date.now() - SUBAGENT_OUTPUT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+		for (const file of readdirSync(subagentOutputDir)) {
+			if (!file.endsWith(".md")) continue;
+			const filePath = join(subagentOutputDir, file);
+			try {
+				if (statSync(filePath).mtimeMs < cutoff) unlinkSync(filePath);
+			} catch {
+				/* skip */
+			}
+		}
+	} catch {
+		/* dir doesn't exist yet */
+	}
+}
+
+/**
+ * Write large subagent output to a file and return a summary with file pointer.
+ * If output is below threshold, returns it unchanged.
+ */
+function compactOutput(output: string, agentName: string): string {
+	if (!output || output.length < SUBAGENT_OUTPUT_THRESHOLD) return output;
+
+	// Write full output to file
+	try {
+		mkdirSync(subagentOutputDir, { recursive: true });
+	} catch {
+		// Can't create dir — return raw output as fallback
+		return output;
+	}
+
+	const ts = new Date().toISOString().replace(/[:.]/g, "-");
+	const fileName = `${ts}_${agentName}.md`;
+	const hostFilePath = join(subagentOutputDir, fileName);
+	const containerFilePath = join(subagentOutputContainerDir, fileName);
+
+	try {
+		writeFileSync(hostFilePath, output, "utf-8");
+	} catch {
+		// Write failed — return raw output as fallback
+		return output;
+	}
+
+	// Build summary: truncated preview + file pointer
+	const preview = output.slice(0, SUBAGENT_OUTPUT_SUMMARY_MAX);
+	const truncatedAt = preview.lastIndexOf("\n");
+	const cleanPreview = truncatedAt > SUBAGENT_OUTPUT_SUMMARY_MAX / 2 ? preview.slice(0, truncatedAt) : preview;
+
+	return [
+		`[${agentName} output — ${output.length} chars, saved to ${containerFilePath}]`,
+		"",
+		cleanPreview,
+		"",
+		`[... truncated — use read tool on ${containerFilePath} for full output]`,
+	].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +575,10 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 	// inside the container (hostWorkspacePath is the mounted data dir on host).
 	subagentLogDir = join(hostWorkspacePath, "logs", "subagent");
 
+	// Resolve output file directory (host path for writing, container path for read pointers).
+	subagentOutputDir = join(hostWorkspacePath, "logs", "subagent-output");
+	subagentOutputContainerDir = join(workspacePath, "logs", "subagent-output");
+
 	// Discover agents from all configured directories, deduplicating by name (first wins)
 	function discoverAllAgents(): AgentConfig[] {
 		const seen = new Set<string>();
@@ -540,6 +618,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 		signal: AbortSignal | undefined,
 	): Promise<{ content: Array<{ type: string; text: string }>; details: unknown }> {
 		cleanupOldTraceLogs();
+		cleanupOldOutputFiles();
 
 		const agents = discoverAllAgents();
 		const cwd = workspacePath;
@@ -555,7 +634,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 			if (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "timeout") {
 				return `[${r.agent}] Error: ${r.errorMessage || "(no output)"}`;
 			}
-			return r.finalOutput || "(no output)";
+			return compactOutput(r.finalOutput, r.agent) || "(no output)";
 		}
 
 		// --- Single mode ---
@@ -652,7 +731,7 @@ export function createSubagentExtension(config: SubagentExtensionConfig): Extens
 			}
 
 			return {
-				content: [{ type: "text", text: results[results.length - 1].finalOutput || "(no output)" }],
+				content: [{ type: "text", text: formatResult(results[results.length - 1]) }],
 				details: results,
 			};
 		}

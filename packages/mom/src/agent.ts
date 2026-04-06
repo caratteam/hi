@@ -306,15 +306,24 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 \`\`\`
 
 ## Subagent Orchestration
-Delegate to subagents when the task benefits from isolated context or parallel investigation.
+Use subagents proactively. Default to the plan-first workflow for any non-trivial task.
 
-Patterns:
-- Research/lookup: explore
-- Complex implementation: explore → plan → (user confirms) → executor
-- Code review: code-reviewer
+### Default Workflow: Plan First
+For any task beyond simple questions or lookups:
+1. Delegate to \`plan\` subagent to investigate and produce an execution plan.
+2. Present the plan to the user for confirmation.
+3. After confirmation, delegate to \`executor\` subagent to implement.
+When in doubt whether a task needs planning, use \`plan\`. Err on the side of planning.
 
-When chaining, pass prior results in the next agent's task description.
-Run independent explore tasks in parallel when investigating multiple areas.
+### Other Patterns
+- Simple lookup/research: \`explore\` (run multiple in parallel for independent queries)
+- Code review: \`code-reviewer\`
+- Quick factual question, 1-line answer: answer directly (no subagent needed)
+
+### Rules
+- When chaining, pass prior results in the next agent's task description.
+- Run independent explore tasks in parallel when investigating multiple areas.
+- Include all relevant context (file paths, requirements, constraints) in the task description — subagents have no shared memory.
 
 ## Tools
 - bash: Run shell commands (primary tool). Install packages as needed.
